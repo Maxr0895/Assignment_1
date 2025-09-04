@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WBR Actionizer</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>WBR Actionizer</h1>
+            <div id="auth-status">
+                <span id="user-info" class="hidden"></span>
+                <button id="logout-btn" class="btn btn-secondary hidden">Logout</button>
+            </div>
+        </header>
+
+        <!-- Health Check Panel -->
+        <section class="panel">
+            <h2>System Health</h2>
+            <button id="health-check-btn" class="btn btn-primary">Check Health</button>
+            <div id="health-result" class="result hidden"></div>
+        </section>
+
+        <!-- Login Panel -->
+        <section class="panel" id="login-panel">
+            <h2>Authentication</h2>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="username">Username:</label>
+                    <input type="text" id="username" required>
+                    <small>Try: admin/admin, editor/editor, or viewer/viewer</small>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password:</label>
+                    <input type="password" id="password" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Login</button>
+            </form>
+            <div id="login-result" class="result hidden"></div>
+        </section>
+
+        <!-- Upload Panel -->
+        <section class="panel protected-content hidden">
+            <h2>Upload Meeting</h2>
+            <form id="upload-form" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="title">Meeting Title:</label>
+                    <input type="text" id="title" placeholder="Optional meeting title">
+                </div>
+                <div class="form-group">
+                    <label for="video-file">Video File:</label>
+                    <input type="file" id="video-file" accept="video/*" required>
+                    <small>Upload an MP4 video file</small>
+                </div>
+                <button type="submit" class="btn btn-primary">Upload Meeting</button>
+            </form>
+            <div id="upload-result" class="result hidden"></div>
+        </section>
+
+        <!-- Meetings List Panel -->
+        <section class="panel protected-content hidden">
+            <h2>Meetings</h2>
+            <div class="controls">
+                <button id="load-meetings-btn" class="btn btn-primary">Load Meetings</button>
+                <div class="pagination-controls">
+                    <button id="prev-page-btn" class="btn btn-secondary" disabled>Previous</button>
+                    <span id="page-info">Page 1</span>
+                    <button id="next-page-btn" class="btn btn-secondary">Next</button>
+                </div>
+            </div>
+            <div id="meetings-result" class="result hidden">
+                <table id="meetings-table" class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Duration</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="meetings-tbody">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Meeting Details Panel -->
+        <section class="panel protected-content hidden">
+            <h2>Meeting Details</h2>
+            <div id="meeting-details" class="hidden">
+                <div class="meeting-info">
+                    <h3 id="meeting-title"></h3>
+                    <p>Status: <span id="meeting-status"></span></p>
+                    <p>Duration: <span id="meeting-duration"></span></p>
+                </div>
+                
+                <div class="processing-controls">
+                    <button id="transcode-btn" class="btn btn-primary">Transcode Video</button>
+                    <button id="transcribe-btn" class="btn btn-primary">Generate Transcript</button>
+                    <button id="extract-actions-btn" class="btn btn-primary">Extract Actions</button>
+                </div>
+                
+                <div id="renditions-section" class="section hidden">
+                    <h4>Video Renditions</h4>
+                    <div id="renditions-list"></div>
+                </div>
+                
+                <div id="thumbnails-section" class="section hidden">
+                    <h4>Thumbnails</h4>
+                    <div id="thumbnails-list" class="thumbnails-grid"></div>
+                </div>
+                
+                <div id="captions-section" class="section hidden">
+                    <h4>Captions & Transcript</h4>
+                    <div id="captions-links"></div>
+                    <div id="transcript-preview"></div>
+                </div>
+                
+                <div id="actions-section" class="section hidden">
+                    <h4>Action Items</h4>
+                    <div id="actions-list"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- WBR Reports Panel -->
+        <section class="panel protected-content hidden">
+            <h2>WBR Summary Report</h2>
+            <form id="report-form">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="report-from">From Date:</label>
+                        <input type="date" id="report-from">
+                    </div>
+                    <div class="form-group">
+                        <label for="report-to">To Date:</label>
+                        <input type="date" id="report-to">
+                    </div>
+                    <div class="form-group">
+                        <label for="report-owner">Owner:</label>
+                        <input type="text" id="report-owner" placeholder="Optional">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-primary">Generate Report</button>
+            </form>
+            <div id="report-result" class="result hidden"></div>
+        </section>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
