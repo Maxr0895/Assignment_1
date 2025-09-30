@@ -86,11 +86,23 @@ router.post('/:id/transcribe', authRequired, requireRole('editor'), async (req, 
     
     let segments: any[] = [];
     
-    if (openaiService.isAvailable() && fs.existsSync(audioPath)) {
-      // Use OpenAI transcription
-      segments = await openaiService.transcribeAudio(audioPath);
+    if (openaiService.isAvailable() && fs.existsSync(audioPath) && !manualTranscript) {
+      // Try OpenAI transcription
+      try {
+        console.log('Attempting OpenAI transcription...');
+        segments = await openaiService.transcribeAudio(audioPath);
+        console.log('✅ OpenAI transcription successful');
+      } catch (error) {
+        console.error('❌ OpenAI transcription failed:', error instanceof Error ? error.message : error);
+        console.log('💡 Please provide a manual transcript to continue');
+        return res.status(400).json({ 
+          error: 'OpenAI transcription failed. Please provide a manual transcript.',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
     } else if (manualTranscript) {
       // Use manual transcript
+      console.log('Using manual transcript provided by user');
       segments = [{
         start: 0,
         end: meeting.duration_s || 0,

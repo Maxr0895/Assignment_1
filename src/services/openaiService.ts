@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import fs from 'fs';
 import path from 'path';
+import https from 'https';
 import { config } from '../config';
 
 interface TranscriptSegment {
@@ -24,12 +25,19 @@ export class OpenAIService {
   
   constructor() {
     if (config.openaiApiKey) {
+      // Create a custom HTTPS agent with keepAlive to prevent ECONNRESET
+      const httpsAgent = new https.Agent({
+        keepAlive: true,
+        keepAliveMsecs: 30000,
+        maxSockets: 50,
+        timeout: 300000
+      });
+
       this.client = new OpenAI({
         apiKey: config.openaiApiKey,
-        maxRetries: 5,
+        maxRetries: 3,
         timeout: 300000, // 5 minutes
-        // Add additional options to help with connection stability
-        httpAgent: undefined
+        httpAgent: httpsAgent
       });
     }
   }
@@ -76,8 +84,12 @@ export class OpenAIService {
       console.log(`Trying OpenAI model: ${model} with format: ${response_format || 'default'}`);
       
       return retryWithBackoff(async () => {
+        // Read file into buffer to avoid stream issues on Windows
+        const fileBuffer = fs.readFileSync(audioPath);
+        const file = new File([fileBuffer], path.basename(audioPath), { type: 'audio/mpeg' });
+        
         const resp: any = await this.client!.audio.transcriptions.create({
-          file: fs.createReadStream(audioPath),
+          file: file,
           model,
           ...(response_format ? { response_format } : {})
         });
@@ -125,20 +137,28 @@ export class OpenAIService {
     const systemPrompt = `Extract Amazon-style Weekly Business Review action items from timestamped transcript segments. \nOutput only valid JSON matching the schema; use ISO dates; infer timestamps from nearby segments.`;
     
     const schema = {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          summary: { type: "string" },
-          owner: { type: ["string", "null"] },
-          due_date: { type: ["string", "null"] },
-          priority: { type: ["string", "null"], enum: ["P0", "P1", "P2", null] },
-          start: { type: "number" },
-          end: { type: "number" },
-          tags: { type: "array", items: { type: "string" } }
-        },
-        required: ["summary", "start", "end", "tags"]
-      }
+      type: "object",
+      properties: {
+        actions: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              summary: { type: "string" },
+              owner: { type: ["string", "null"] },
+              due_date: { type: ["string", "null"] },
+              priority: { type: ["string", "null"], enum: ["P0", "P1", "P2", null] },
+              start: { type: "number" },
+              end: { type: "number" },
+              tags: { type: "array", items: { type: "string" } }
+            },
+            required: ["summary", "start", "end", "tags"],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ["actions"],
+      additionalProperties: false
     };
     
     try {
@@ -162,7 +182,8 @@ export class OpenAIService {
         return [];
       }
       
-      return JSON.parse(content);
+      const parsed = JSON.parse(content);
+      return parsed.actions || [];
     } catch (error) {
       throw new Error(`OpenAI action extraction failed: ${error}`);
     }

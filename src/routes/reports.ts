@@ -18,8 +18,11 @@ router.get('/wbr-summary', authRequired, async (req, res) => {
     }
     
     if (to) {
-      whereClause += ' AND m.created_at <= ?';
-      params.push(to);
+      // Add one day to include the entire "to" date
+      const toDate = new Date(to as string);
+      toDate.setDate(toDate.getDate() + 1);
+      whereClause += ' AND m.created_at < ?';
+      params.push(toDate.toISOString().split('T')[0]);
     }
     
     if (owner) {
