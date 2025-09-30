@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { config } from './config';
-import { initializeDatabase } from './services/db';
 import authRoutes from './routes/auth';
 import meetingsRoutes from './routes/meetings';
 import processingRoutes from './routes/processing';
@@ -10,25 +9,24 @@ import reportsRoutes from './routes/reports';
 
 const app = express();
 
-// Initialize database
-initializeDatabase();
-
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+
 // Note: JSON parsing is applied within individual routers to avoid conflicts with multipart uploads
 
 // Serve static files from public directory
 app.use(express.static('public'));
-
-// Serve uploaded files
-app.use('/files', express.static(config.dataDir));
 
 // Health check (no auth required)
 app.get('/health', (req, res) => {
   res.json({ 
     ok: true, 
     uptime: process.uptime(),
-    openaiAvailable: !!config.openaiApiKey
+    openaiAvailable: !!config.openaiApiKey,
+    stateless: true
   });
 });
 
@@ -58,6 +56,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 const server = app.listen(config.port, () => {
   console.log(`WBR Actionizer server running on port ${config.port}`);
   console.log(`OpenAI integration: ${config.openaiApiKey ? 'enabled' : 'disabled'}`);
+  console.log(`Stateless mode: ✅ (no sessions, pure JWT auth)`);
 });
 
 // Graceful shutdown

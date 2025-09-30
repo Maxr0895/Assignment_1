@@ -1,52 +1,69 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
+import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { config } from '../config';
 
-interface AuthUser {
+// Create JWT verifier for Cognito Access Tokens
+const verifier = CognitoJwtVerifier.create({
+  userPoolId: config.cognitoUserPoolId,
+  tokenUse: 'access',
+  clientId: config.cognitoClientId,
+});
+
+interface CognitoUser {
   sub: string;
-  role: string;
+  username: string;
+  email?: string;
+  'cognito:groups'?: string[];
 }
 
 declare global {
   namespace Express {
     interface Request {
-      user?: AuthUser;
+      user?: CognitoUser;
     }
   }
 }
 
-export function authRequired(req: Request, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader?.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Authorization header required' });
-  }
-  
-  const token = authHeader.substring(7);
-  
+/**
+ * Middleware to ensure authentication via Cognito Access Token
+ * Pure bearer token auth - NO sessions
+ */
+export async function authRequired(req: Request, res: Response, next: NextFunction) {
   try {
-    const payload = jwt.verify(token, config.jwtSecret) as AuthUser;
-    req.user = payload;
-    next();
-  } catch (error) {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-}
+    // Extract Bearer token from Authorization header
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ 
+        error: 'Authentication required',
+        message: 'Provide a valid Bearer token in Authorization header'
+      });
+    }
 
-export function requireRole(role: string) {
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Authentication required' });
+    const token = authHeader.substring(7);
+
+    try {
+      // Verify JWT using aws-jwt-verify (validates signature, expiry, issuer)
+      const payload = await verifier.verify(token);
+      
+      // Attach user info to request
+      req.user = {
+        sub: payload.sub,
+        username: payload.username || payload.sub,
+        email: payload.email,
+        'cognito:groups': payload['cognito:groups']
+      };
+
+      return next();
+    } catch (error: any) {
+      console.error('Token verification failed:', error.message);
+      return res.status(401).json({ 
+        error: 'Invalid or expired token',
+        details: error.message 
+      });
     }
-    
-    const roleHierarchy = { admin: 3, editor: 2, viewer: 1 };
-    const requiredLevel = roleHierarchy[role as keyof typeof roleHierarchy];
-    const userLevel = roleHierarchy[req.user.role as keyof typeof roleHierarchy];
-    
-    if (userLevel < requiredLevel) {
-      return res.status(403).json({ error: 'Insufficient permissions' });
-    }
-    
-    next();
-  };
+  } catch (error) {
+    console.error('Authentication error:', error);
+    return res.status(500).json({ error: 'Authentication failed' });
+  }
 }

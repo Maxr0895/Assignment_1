@@ -16,10 +16,24 @@ class WBRApp {
       .getElementById("health-check-btn")
       .addEventListener("click", () => this.checkHealth());
 
+    // Authentication tabs
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => this.switchTab(e.target.dataset.tab));
+    });
+
     // Authentication
     document
       .getElementById("login-form")
       .addEventListener("submit", (e) => this.handleLogin(e));
+    document
+      .getElementById("register-form")
+      .addEventListener("submit", (e) => this.handleRegister(e));
+    document
+      .getElementById("confirm-form")
+      .addEventListener("submit", (e) => this.handleConfirm(e));
+    document
+      .getElementById("reset-form")
+      .addEventListener("submit", (e) => this.handleReset(e));
     document
       .getElementById("logout-btn")
       .addEventListener("click", () => this.logout());
@@ -101,18 +115,34 @@ class WBRApp {
     }
   }
 
+  switchTab(tabName) {
+    // Hide all tabs
+    document.querySelectorAll(".tab-content").forEach((tab) => {
+      tab.classList.add("hidden");
+      tab.classList.remove("active");
+    });
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.classList.remove("active");
+    });
+
+    // Show selected tab
+    document.getElementById(`${tabName}-tab`).classList.remove("hidden");
+    document.getElementById(`${tabName}-tab`).classList.add("active");
+    document.querySelector(`[data-tab="${tabName}"]`).classList.add("active");
+  }
+
   showAuthenticated(role) {
-    document.getElementById("login-panel").classList.add("hidden");
+    document.getElementById("auth-panel").classList.add("hidden");
     document
       .querySelectorAll(".protected-content")
       .forEach((el) => el.classList.remove("hidden"));
-    document.getElementById("user-info").textContent = `Logged in as ${role}`;
+    document.getElementById("user-info").textContent = `Logged in as ${role || 'user'}`;
     document.getElementById("user-info").classList.remove("hidden");
     document.getElementById("logout-btn").classList.remove("hidden");
   }
 
   showUnauthenticated() {
-    document.getElementById("login-panel").classList.remove("hidden");
+    document.getElementById("auth-panel").classList.remove("hidden");
     document
       .querySelectorAll(".protected-content")
       .forEach((el) => el.classList.add("hidden"));
@@ -156,8 +186,8 @@ class WBRApp {
   async handleLogin(e) {
     e.preventDefault();
 
-    const username = document.getElementById("username").value;
-    const password = document.getElementById("password").value;
+    const username = document.getElementById("login-username").value;
+    const password = document.getElementById("login-password").value;
 
     try {
       const response = await this.apiFetch("/v1/login", {
@@ -167,9 +197,10 @@ class WBRApp {
 
       if (response.ok) {
         const data = await response.json();
-        localStorage.setItem("jwt", data.token);
-        localStorage.setItem("userRole", data.role);
-        this.showAuthenticated(data.role);
+        // Use accessToken for API authentication (stateless)
+        localStorage.setItem("jwt", data.accessToken);
+        localStorage.setItem("userRole", username);
+        this.showAuthenticated(username);
         this.showResult("login-result", "Login successful!", "success");
       } else {
         const error = await response.json();
@@ -179,6 +210,103 @@ class WBRApp {
       this.showResult(
         "login-result",
         `Login failed: ${error.message}`,
+        "error"
+      );
+    }
+  }
+
+  async handleRegister(e) {
+    e.preventDefault();
+
+    const username = document.getElementById("reg-username").value;
+    const email = document.getElementById("reg-email").value;
+    const password = document.getElementById("reg-password").value;
+
+    try {
+      const response = await fetch("/v1/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, email, password }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        this.showResult("register-result", data.message, "success");
+        // Pre-fill confirmation form
+        document.getElementById("confirm-username").value = username;
+        // Switch to confirmation tab
+        setTimeout(() => this.switchTab("confirm"), 2000);
+      } else {
+        this.showResult("register-result", data.error, "error");
+      }
+    } catch (error) {
+      this.showResult(
+        "register-result",
+        `Registration failed: ${error.message}`,
+        "error"
+      );
+    }
+  }
+
+  async handleConfirm(e) {
+    e.preventDefault();
+
+    const username = document.getElementById("confirm-username").value;
+    const code = document.getElementById("confirm-code").value;
+
+    try {
+      const response = await fetch("/v1/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, code }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        this.showResult("confirm-result", data.message + " You can now login!", "success");
+        // Switch to login tab
+        setTimeout(() => this.switchTab("login"), 2000);
+      } else {
+        this.showResult("confirm-result", data.error, "error");
+      }
+    } catch (error) {
+      this.showResult(
+        "confirm-result",
+        `Confirmation failed: ${error.message}`,
+        "error"
+      );
+    }
+  }
+
+  async handleReset(e) {
+    e.preventDefault();
+
+    const username = document.getElementById("reset-username").value;
+    const code = document.getElementById("reset-code").value;
+    const newPassword = document.getElementById("reset-password").value;
+
+    try {
+      const response = await fetch("/v1/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, code, newPassword }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        this.showResult("reset-result", data.message, "success");
+        // Switch to login tab
+        setTimeout(() => this.switchTab("login"), 2000);
+      } else {
+        this.showResult("reset-result", data.error, "error");
+      }
+    } catch (error) {
+      this.showResult(
+        "reset-result",
+        `Password reset failed: ${error.message}`,
         "error"
       );
     }

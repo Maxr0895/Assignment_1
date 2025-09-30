@@ -54,7 +54,9 @@ export class FFmpegService {
         stderr += data.toString();
       });
       
-      child.on('close', () => {
+      child.on('close', (code) => {
+        console.log('FFmpeg duration check stderr:', stderr.substring(0, 500));
+        
         const durationMatch = stderr.match(/Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})/);
         if (durationMatch) {
           const hours = parseInt(durationMatch[1]);
@@ -65,7 +67,8 @@ export class FFmpegService {
           const totalSeconds = hours * 3600 + minutes * 60 + seconds + centiseconds / 100;
           resolve(totalSeconds);
         } else {
-          reject(new Error('Could not parse video duration'));
+          console.error('FFmpeg stderr (full):', stderr);
+          reject(new Error(`Could not parse video duration. FFmpeg exit code: ${code}`));
         }
       });
 

@@ -1,263 +1,370 @@
-# WBR Actionizer
+# WBR Actionizer (Stateless)
 
-A production-ready REST API for Weekly Business Review action item extraction from video meetings. Features CPU-intensive video transcoding, optional OpenAI integration, and comprehensive reporting capabilities.
+A fully **stateless** REST API for Weekly Business Review action item extraction from video meetings. Features CPU-intensive video transcoding, AWS Cognito authentication, S3/DynamoDB storage, and optional OpenAI integration.
 
-## Features
+## 🚀 Key Features
 
-- **REST API**: Full CRUD operations with JWT authentication and role-based access
-- **Video Processing**: CPU-intensive transcoding with ffmpeg (multiple resolutions, thumbnails, audio extraction)
-- **AI Integration**: Optional OpenAI transcription and action item extraction with fallbacks
-- **Data Storage**: SQLite for structured data, file system for media assets
-- **Load Testing**: Python script for stress testing CPU-intensive operations
-- **Docker Ready**: Containerized deployment with all dependencies
+- **Fully Stateless**: No sessions, no local storage - all state in S3 & DynamoDB
+- **AWS Cognito Auth**: Pure bearer token authentication with JWT verification
+- **S3 Storage**: All media files stored in AWS S3 with presigned URLs
+- **DynamoDB**: Single-table design for all metadata
+- **Idempotent Operations**: Retry-safe with Idempotency-Key support
+- **Temp File Hygiene**: Automatic cleanup of ffmpeg intermediate files
+- **Status Tracking**: Meeting processing status persisted in DynamoDB
+- **Docker Ready**: Containerized deployment with zero local dependencies
 
-## Quick Start
+## 📋 Prerequisites
 
-### Local Development
+- Node.js 20+
+- AWS Account with:
+  - S3 bucket created
+  - DynamoDB table created (partition key: `qut-username`, sort key: `sk`)
+  - Cognito User Pool with app client configured
+- FFmpeg installed (for local development)
 
-1. **Install dependencies**:
+## 🏃 Quick Start
+
+### 1. Clone and Install
 
 ```bash
+git clone <your-repo>
+cd Assignment_1
 npm install
 ```
 
-2. **Set up environment**:
+### 2. Configure Environment
 
 ```bash
-cp .env.example .env
-# Edit .env with your configuration
+cp env.example .env
+# Edit .env with your AWS credentials and Cognito details
 ```
 
-3. **Initialize database and seed users**:
+**Required environment variables**:
+```env
+# Server
+PORT=8080
+JWT_SECRET=your_jwt_secret_here
+
+# AWS Services
+AWS_REGION=ap-southeast-2
+S3_BUCKET=your-bucket-name
+DDB_TABLE=your-table-name
+QUT_USERNAME=n12345678@qut.edu.au
+
+# AWS Credentials (from AWS Academy)
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_SESSION_TOKEN=your_session_token
+
+# Cognito
+COGNITO_USER_POOL_ID=your-pool-id
+COGNITO_CLIENT_ID=your-client-id
+
+# FFmpeg
+FFMPEG_PATH=/usr/bin/ffmpeg  # or C:\path\to\ffmpeg.exe on Windows
+
+# Optional
+OPENAI_API_KEY=sk-...
+```
+
+### 3. Register a User
 
 ```bash
-npm run initdb
-npm run seed
+# Register
+curl -X POST http://localhost:8080/v1/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "testuser",
+    "email": "test@example.com",
+    "password": "Test1234!"
+  }'
+
+# Confirm (use code from email)
+curl -X POST http://localhost:8080/v1/confirm \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "testuser",
+    "code": "123456"
+  }'
 ```
 
-4. **Start development server**:
+### 4. Run the Server
 
 ```bash
 npm run dev
 ```
 
-The application will be available at `http://localhost:8080`.
+Visit `http://localhost:8080` to access the web UI.
 
-### Default Users
+## 🔐 Authentication Flow
 
-After seeding, you can login with:
+**100% stateless - no sessions!**
 
-- `admin/admin` (full access)
-- `editor/editor` (can upload and process)
-- `viewer/viewer` (read-only access)
-
-## API Endpoints
-
-### Authentication
-
-- `POST /v1/login` - Login with username/password, returns JWT token
-
-### Meetings
-
-- `POST /v1/meetings` - Upload new meeting video (multipart form)
-- `GET /v1/meetings` - List meetings with pagination/filtering
-- `GET /v1/meetings/:id` - Get detailed meeting information
-
-### Processing
-
-- `POST /v1/meetings/:id/transcode` - CPU-intensive video transcoding
-- `POST /v1/meetings/:id/transcribe` - Generate transcript (OpenAI or manual)
-- `POST /v1/meetings/:id/actions` - Extract action items
-
-### Reports
-
-- `GET /v1/reports/wbr-summary` - Weekly business review summary with filters
-
-### Example API Usage
+1. **Register**: `POST /v1/register` → creates Cognito user
+2. **Confirm**: `POST /v1/confirm` → verifies email with code
+3. **Login**: `POST /v1/login` → returns `accessToken` and `idToken`
+4. **API Calls**: Include `Authorization: Bearer <accessToken>` header
 
 ```bash
 # Login
-curl -X POST http://localhost:8080/v1/login \
+RESPONSE=$(curl -s -X POST http://localhost:8080/v1/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"editor","password":"editor"}'
+  -d '{"username":"testuser","password":"Test1234!"}')
 
-# Upload meeting (use the JWT token from login)
-curl -X POST http://localhost:8080/v1/meetings \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -F "file=@meeting.mp4" \
-  -F "title=Weekly Team Meeting"
+# Extract access token
+TOKEN=$(echo $RESPONSE | jq -r '.accessToken')
 
-# Transcode video (CPU intensive)
-curl -X POST http://localhost:8080/v1/meetings/MEETING_ID/transcode \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
-
-# Generate transcript
-curl -X POST http://localhost:8080/v1/meetings/MEETING_ID/transcribe \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"manualTranscript":"Meeting transcript text..."}'
-
-# Extract actions
-curl -X POST http://localhost:8080/v1/meetings/MEETING_ID/actions \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+# Use in API calls
+curl -X GET http://localhost:8080/v1/meetings \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-## Docker Deployment
+## 📡 API Endpoints
 
-### Build and Run
+### Authentication (Public)
+
+- `POST /v1/register` - Register new user
+- `POST /v1/confirm` - Confirm email with code
+- `POST /v1/login` - Login (returns JWT tokens)
+- `POST /v1/reset-password` - Reset password with code
+
+### Meetings (Protected)
+
+- `POST /v1/meetings` - Upload video (multipart form)
+- `GET /v1/meetings` - List meetings
+- `GET /v1/meetings/:id` - Get meeting details with presigned URLs
+
+### Processing (Protected)
+
+- `POST /v1/meetings/:id/transcode` - Transcode video (CPU-intensive)
+- `POST /v1/meetings/:id/transcribe` - Generate transcript
+- `POST /v1/meetings/:id/actions` - Extract action items
+
+### Reports (Protected)
+
+- `GET /v1/reports/wbr-summary` - Weekly business review summary
+
+### Health
+
+- `GET /health` - Health check (public)
+
+## 🔄 Stateless Operation
+
+### Status Tracking
+
+Meeting status is persisted in DynamoDB:
+- `uploaded` → `processing` → `done` | `failed`
 
 ```bash
-# Build the Docker image
-docker build -t wbr-actionizer .
+# Check meeting status
+curl http://localhost:8080/v1/meetings/MEETING_ID \
+  -H "Authorization: Bearer $TOKEN" | jq '.status'
+```
 
-# Run the container
+### Idempotency
+
+Add `Idempotency-Key` header to prevent duplicate processing:
+
+```bash
+curl -X POST http://localhost:8080/v1/meetings/MEETING_ID/transcode \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: unique-key-123"
+```
+
+### Temp File Cleanup
+
+All ffmpeg operations use `os.tmpdir()` with automatic cleanup:
+- Temp directory created per operation
+- Files cleaned up in `finally` block
+- No persistent local storage
+
+## 🐳 Docker Deployment
+
+### Build
+
+```bash
+docker build -t wbr-actionizer .
+```
+
+### Run
+
+```bash
 docker run -d \
   -p 8080:8080 \
-  -v $(pwd)/data:/data \
-  -e JWT_SECRET=your_secret_here \
-  -e OPENAI_API_KEY=your_openai_key \
-  --name wbr-actionizer \
+  -e AWS_REGION=ap-southeast-2 \
+  -e S3_BUCKET=your-bucket \
+  -e DDB_TABLE=your-table \
+  -e QUT_USERNAME=n12345678@qut.edu.au \
+  -e AWS_ACCESS_KEY_ID=... \
+  -e AWS_SECRET_ACCESS_KEY=... \
+  -e AWS_SESSION_TOKEN=... \
+  -e COGNITO_USER_POOL_ID=... \
+  -e COGNITO_CLIENT_ID=... \
+  -e JWT_SECRET=prod-secret \
+  --name wbr \
   wbr-actionizer
 ```
 
-### AWS ECR & EC2 Deployment
+### EC2 Deployment
 
 1. **Push to ECR**:
-
 ```bash
-# Create ECR repository
 aws ecr create-repository --repository-name wbr-actionizer
-
-# Get login token
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
-
-# Tag and push
-docker tag wbr-actionizer:latest YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/wbr-actionizer:latest
-docker push YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/wbr-actionizer:latest
+docker tag wbr-actionizer:latest ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
+docker push ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
 ```
 
-2. **Deploy to EC2**:
-
+2. **Run on EC2** (with IAM role for S3/DynamoDB):
 ```bash
-# On EC2 instance
-docker pull YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/wbr-actionizer:latest
+docker pull ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
 docker run -d -p 80:8080 \
-  -v /opt/wbr-data:/data \
-  -e JWT_SECRET=production_secret \
-  -e OPENAI_API_KEY=your_key \
-  YOUR_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/wbr-actionizer:latest
+  -e AWS_REGION=ap-southeast-2 \
+  -e S3_BUCKET=... \
+  -e DDB_TABLE=... \
+  -e QUT_USERNAME=... \
+  -e COGNITO_USER_POOL_ID=... \
+  -e COGNITO_CLIENT_ID=... \
+  -e JWT_SECRET=... \
+  ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
 ```
 
-## Load Testing
+## ✅ Acceptance Tests
 
-The included Python script stress tests the CPU-intensive transcoding endpoint:
+### Test Stateless Operation
+
+1. **Upload and transcode a video**:
+```bash
+MEETING_ID=$(curl -X POST http://localhost:8080/v1/meetings \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@test.mp4" | jq -r '.meetingId')
+
+curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+2. **Kill the container mid-processing**:
+```bash
+docker rm -f wbr
+```
+
+3. **Restart the container**:
+```bash
+docker run -d -p 8080:8080 ... --name wbr wbr-actionizer
+```
+
+4. **Re-trigger transcode** (should safely overwrite):
+```bash
+curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Expected**:
+- ✅ S3 objects and DynamoDB items are intact
+- ✅ Re-running completes successfully
+- ✅ Status updates to `done`
+
+### Test Idempotency
 
 ```bash
-# Install dependencies
-pip3 install httpx
+# Run twice with same key
+curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: test-123"
 
-# First, get a JWT token and upload some meetings
-# Then run the load test
-python3 scripts/loadtest_transcode.py \
-  --base-url http://localhost:8080 \
-  --jwt YOUR_JWT_TOKEN \
-  --ids "meeting-id-1,meeting-id-2,meeting-id-3" \
-  --concurrency 10 \
-  --repeat 5
+curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: test-123"
 ```
 
-This will generate 200-300 concurrent transcode requests to keep EC2 CPU above 80% for 5+ minutes.
+**Expected**:
+- ✅ Second request returns cached result immediately
 
-Monitor CPU usage with:
+## 🏗️ Architecture
 
-```bash
-# On EC2
-top
-# Or use CloudWatch metrics
-```
+### Single-Table DynamoDB Design
 
-## Project Structure
+**Partition Key**: `qut-username` (always your QUT email)  
+**Sort Key**: `sk` (entity type + ID)
 
-```
-/public/              # Static web client
-  index.html         # Main UI
-  styles.css         # Styling
-  app.js            # Frontend logic
-/src/
-  server.ts         # Express server setup
-  config.ts         # Configuration management
-  routes/           # API route handlers
-    auth.ts         # Authentication endpoints
-    meetings.ts     # Meeting CRUD operations
-    processing.ts   # Video processing endpoints
-    reports.ts      # Reporting endpoints
-  middleware/
-    auth.ts         # JWT authentication middleware
-  services/
-    db.ts           # SQLite database service
-    ffmpegService.ts # Video transcoding service
-    openaiService.ts # OpenAI integration
-    actionsFallback.ts # Rule-based action extraction
-  models/
-    schema.sql      # Database schema
-    seed.ts         # Database seeding
-/scripts/
-  loadtest_transcode.py # Load testing script
-/data/               # Data directory (gitignored)
-  app.db            # SQLite database
-  meetings/         # Meeting files organized by UUID
-```
+Entity types:
+- `MEETING#<uuid>` - Meeting metadata + status
+- `REND#<meetingId>#<resolution>` - Rendition metadata
+- `CAPTIONS#<meetingId>` - Caption metadata
+- `ACTION#<meetingId>#<actionId>` - Action item
+- `IDEMP#<key>` - Idempotency tracking (24h TTL)
 
-## Configuration
-
-### Required Environment Variables
-
-- `PORT`: Server port (default: 8080)
-- `JWT_SECRET`: Secret for JWT token signing (required)
-
-### Optional Environment Variables
-
-- `OPENAI_API_KEY`: Enable AI-powered transcription and action extraction
-
-## Data Storage
-
-### Structured Data (SQLite)
-
-- Users, meetings metadata, renditions, captions, actions
-- Single file database at `/data/app.db`
-
-### Unstructured Data (File System)
-
-Each meeting stored under `/data/meetings/<uuid>/`:
-
-- `input.mp4` - Original uploaded video
-- `out_1080p.mp4`, `out_720p.mp4` - Transcoded renditions
-- `audio.wav` - Extracted audio for transcription
-- `thumbs_*.jpg` - Generated thumbnails (every 2 seconds)
-- `captions.srt`, `captions.vtt` - Caption files
-
-## Architecture Decisions
-
-- **Single Process**: No queues or microservices for simplicity
-- **File Storage**: Local file system (easily adaptable to S3)
-- **CPU Intensive**: Intentionally uses slow ffmpeg presets for load testing
-- **Optional AI**: Graceful fallbacks when OpenAI is unavailable
-- **Same Origin**: Frontend served by Express to avoid CORS complexity
-
-## Performance Notes
-
-The transcoding process is intentionally CPU-intensive using `ffmpeg -preset veryslow` to generate load for performance testing. In production, you might want to use faster presets for better user experience.
-
-## Environment Variables
-
-Create a `.env` file in the project root based on the following example:
+### S3 Storage Pattern
 
 ```
-PORT=8080
-JWT_SECRET=change_me
-
-# Optional external APIs
-OPENAI_API_KEY=
-# Optional custom data directory (defaults to ./data)
-DATA_DIR=
+meetings/<meetingId>/
+  input.mp4
+  out_1080p.mp4
+  out_720p.mp4
+  audio.mp3
+  captions.srt
+  captions.vtt
+  thumbs_0.jpg
+  thumbs_2.jpg
+  ...
 ```
+
+All file access via presigned URLs (expire in 1 hour).
+
+### Temp File Lifecycle
+
+```typescript
+let tempDir = await makeTempDir('transcode');
+try {
+  // Download from S3 → tempDir
+  // Process with ffmpeg
+  // Upload to S3
+} finally {
+  await cleanupDir(tempDir); // Always cleanup
+}
+```
+
+## 📊 Project Structure
+
+```
+/src
+  server.ts           # Express setup (NO sessions)
+  config.ts          # Environment config
+  /middleware
+    auth.ts          # JWT verification with aws-jwt-verify
+  /routes
+    auth.ts          # Registration, login (stateless)
+    meetings.ts      # CRUD operations
+    processing.ts    # Transcode, transcribe, actions
+    reports.ts       # WBR summary
+  /services
+    s3.ts            # S3 operations with presigned URLs
+    ddb.ts           # DynamoDB operations
+    ffmpegService.ts # Video transcoding
+    openaiService.ts # AI integration
+    cognitoAuth.ts   # Direct Cognito API calls
+  /utils
+    temp.ts          # Temp directory management
+```
+
+## 🔧 Troubleshooting
+
+### "Token has expired" errors
+
+AWS Academy credentials expire every few hours. Refresh:
+1. Go to AWS Academy Learner Lab
+2. Click "AWS Details"
+3. Copy fresh credentials
+4. Update `.env`
+5. Restart server
+
+### "Invalid token issuer"
+
+Check `COGNITO_USER_POOL_ID` matches your actual pool ID.
+
+### Transcode fails
+
+Ensure `FFMPEG_PATH` is correct for your OS.
+
+## 📝 License
+
+MIT

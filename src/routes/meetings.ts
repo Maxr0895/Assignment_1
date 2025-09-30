@@ -1,38 +1,27 @@
 import { Router } from 'express';
 import multer from 'multer';
 import fs from 'fs';
-import path from 'path';
 import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
-import { authRequired, requireRole } from '../middleware/auth';
-import { dbHelpers } from '../services/db';
-import { config } from '../config';
+import { authRequired } from '../middleware/auth';
+import { s3Service } from '../services/s3';
+import { ddbService } from '../services/ddb';
 
 const router = Router();
 
-function moveFileSafe(src: string, dest: string) {
-  try {
-    fs.renameSync(src, dest);
-  } catch (err: any) {
-    // Cross-device or permission edge cases: fall back to copy+unlink
-    if (err && (err.code === 'EXDEV' || err.code === 'EPERM' || err.code === 'EACCES')) {
-      fs.copyFileSync(src, dest);
-      fs.unlinkSync(src);
-    } else {
-      throw err;
-    }
-  }
-}
-
 const maxUploadMB = parseInt(process.env.UPLOAD_MAX_MB || '300');
 
-// Configure multer for file uploads
+// Configure multer for file uploads (temp storage only)
 const upload = multer({
   dest: os.tmpdir(),
   limits: { fileSize: maxUploadMB * 1024 * 1024 }
 });
 
-router.post('/', authRequired, requireRole('editor'), upload.single('file'), async (req, res) => {
+/**
+ * POST /v1/meetings
+ * Upload a new meeting video
+ */
+router.post('/', authRequired, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Video file required' });
@@ -42,39 +31,64 @@ router.post('/', authRequired, requireRole('editor'), upload.single('file'), asy
     const title = req.body.title || `Meeting ${new Date().toISOString().split('T')[0]}`;
     const userId = req.user!.sub;
     
-    // Create meeting directory
-    const meetingDir = path.join(config.dataDir, 'meetings', meetingId);
-    fs.mkdirSync(meetingDir, { recursive: true });
+    // Define S3 prefix for this meeting
+    const s3Prefix = `meetings/${meetingId}`;
     
-    // Move uploaded file to meeting directory
-    const inputPath = path.join(meetingDir, 'input.mp4');
-    moveFileSafe(req.file.path, inputPath);
+    // Upload file to S3
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const fileExtension = req.file.originalname.split('.').pop() || 'mp4';
+    const s3Key = `${s3Prefix}/input.${fileExtension}`;
     
-    // Save to database
-    dbHelpers.createMeeting(meetingId, userId, title, req.file.originalname);
+    await s3Service.putObject(
+      s3Key,
+      fileBuffer,
+      req.file.mimetype || 'video/mp4'
+    );
     
-    res.json({ meetingId });
+    // Clean up temp file
+    fs.unlinkSync(req.file.path);
+    
+    // Save meeting metadata to DynamoDB
+    await ddbService.createMeeting({
+      id: meetingId,
+      title,
+      status: 'uploaded',
+      s3Prefix,
+      created_at: new Date().toISOString(),
+      originalFilename: req.file.originalname,
+      userId
+    });
+    
+    res.json({ 
+      meetingId,
+      message: 'Meeting uploaded successfully'
+    });
   } catch (error: any) {
     console.error('Meeting creation error:', error?.message || error);
     res.status(500).json({ error: 'Failed to create meeting' });
   }
 });
 
+/**
+ * GET /v1/meetings
+ * List all meetings
+ */
 router.get('/', authRequired, async (req, res) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 10;
-    const sortBy = (req.query.sortBy as string) || 'created_at';
-    const order = ((req.query.order as string) || 'desc').toUpperCase();
     
-    const offset = (page - 1) * limit;
+    const meetings = await ddbService.listMeetings(limit);
     
-    const meetings = dbHelpers.getMeetings(limit, offset, sortBy, order);
+    // Sort by created_at descending
+    meetings.sort((a, b) => {
+      const dateA = new Date(a.created_at || 0).getTime();
+      const dateB = new Date(b.created_at || 0).getTime();
+      return dateB - dateA;
+    });
     
     res.json({
       meetings,
       pagination: {
-        page,
         limit,
         hasMore: meetings.length === limit
       }
@@ -85,47 +99,69 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
+/**
+ * GET /v1/meetings/:id
+ * Get meeting details with presigned URLs
+ */
 router.get('/:id', authRequired, async (req, res) => {
   try {
     const meetingId = req.params.id;
     
-    const meeting = dbHelpers.getMeetingById(meetingId);
+    // Get meeting from DynamoDB
+    const meeting = await ddbService.getMeeting(meetingId);
     if (!meeting) {
       return res.status(404).json({ error: 'Meeting not found' });
     }
     
-    const renditions = dbHelpers.getRenditionsByMeeting(meetingId) as Array<{ path: string; resolution: string; size_bytes: number }>;
-    const captions = dbHelpers.getCaptionsByMeeting(meetingId);
-    const actions = dbHelpers.getActionsByMeeting(meetingId);
+    // Get related items
+    const renditions = await ddbService.getRenditions(meetingId);
+    const captions = await ddbService.getCaptions(meetingId);
+    const actions = await ddbService.getActions(meetingId);
     
-    // Generate file URLs
-    const meetingDir = path.join(config.dataDir, 'meetings', meetingId);
+    // Generate presigned URLs for files
     const fileUrls: any = {};
+    const thumbnails: string[] = [];
     
-    if (fs.existsSync(path.join(meetingDir, 'input.mp4'))) {
-      fileUrls.original = `/files/meetings/${meetingId}/input.mp4`;
+    // Original input file
+    const inputExtension = meeting.originalFilename?.split('.').pop() || 'mp4';
+    try {
+      fileUrls.original = await s3Service.getPresignedGetUrl(
+        `${meeting.s3Prefix}/input.${inputExtension}`
+      );
+    } catch (err) {
+      console.log('Original file not found in S3');
     }
     
-    renditions.forEach((r) => {
-      const filename = path.basename(r.path);
-      fileUrls[r.resolution] = `/files/meetings/${meetingId}/${filename}`;
-    });
+    // Renditions
+    for (const rendition of renditions) {
+      try {
+        fileUrls[rendition.resolution] = await s3Service.getPresignedGetUrl(rendition.key);
+      } catch (err) {
+        console.log(`Rendition ${rendition.resolution} not found`);
+      }
+    }
     
+    // Captions
     if (captions) {
-      if (fs.existsSync(path.join(meetingDir, 'captions.srt'))) {
-        fileUrls.srt = `/files/meetings/${meetingId}/captions.srt`;
+      if (captions.srtKey) {
+        try {
+          fileUrls.srt = await s3Service.getPresignedGetUrl(captions.srtKey);
+        } catch (err) {
+          console.log('SRT file not found');
+        }
       }
-      if (fs.existsSync(path.join(meetingDir, 'captions.vtt'))) {
-        fileUrls.vtt = `/files/meetings/${meetingId}/captions.vtt`;
+      if (captions.vttKey) {
+        try {
+          fileUrls.vtt = await s3Service.getPresignedGetUrl(captions.vttKey);
+        } catch (err) {
+          console.log('VTT file not found');
+        }
       }
     }
     
-    // Add thumbnails
-    const thumbnails = fs.existsSync(meetingDir) ? 
-      fs.readdirSync(meetingDir)
-        .filter(file => file.startsWith('thumbs_') && file.endsWith('.jpg'))
-        .map(file => `/files/meetings/${meetingId}/${file}`)
-        .sort() : [];
+    // Note: Thumbnails would need to be tracked separately in DDB
+    // For now, we'll include an empty array
+    // TODO: Implement thumbnail tracking in DDB
     
     res.json({
       ...meeting,
