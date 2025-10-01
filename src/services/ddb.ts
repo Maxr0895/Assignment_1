@@ -160,6 +160,7 @@ export class DDBService {
     status: string;
     s3Prefix: string;
     created_at: string;
+    userId: string;
     duration_s?: number;
     originalFilename?: string;
   }): Promise<void> {

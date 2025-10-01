@@ -73,7 +73,7 @@ router.post('/:id/transcode', authRequired, requireGroup('Admin'), async (req, r
     const s3Response = await s3Client.send(getCommand);
     const inputStream = s3Response.Body as any;
     const writeStream = fs.createWriteStream(inputTempPath);
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       inputStream.pipe(writeStream);
       inputStream.on('error', reject);
       writeStream.on('finish', resolve);
@@ -173,9 +173,8 @@ router.post('/:id/transcode', authRequired, requireGroup('Admin'), async (req, r
       details: error instanceof Error ? error.message : 'Unknown error'
     });
   } finally {
-    // Always clean up temp files
     if (tempDir) {
-      await cleanupDir(tempDir);
+      cleanupDir(tempDir).catch(() => undefined);
     }
   }
 });
@@ -226,7 +225,7 @@ router.post('/:id/transcribe', authRequired, requireGroup('Admin'), async (req, 
         const s3Response = await s3Client.send(getCommand);
         const audioStream = s3Response.Body as any;
         const writeStream = fs.createWriteStream(audioTempPath);
-        await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
           audioStream.pipe(writeStream);
           audioStream.on('error', reject);
           writeStream.on('finish', resolve);
@@ -304,9 +303,8 @@ router.post('/:id/transcribe', authRequired, requireGroup('Admin'), async (req, 
       details: error instanceof Error ? error.message : 'Unknown error'
     });
   } finally {
-    // Always clean up temp files
     if (tempDir) {
-      await cleanupDir(tempDir);
+      cleanupDir(tempDir).catch(() => undefined);
     }
   }
 });
