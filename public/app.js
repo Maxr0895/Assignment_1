@@ -2,6 +2,8 @@ class WBRApp {
   constructor() {
     this.currentPage = 1;
     this.currentMeetingId = null;
+    this.eventSource = null; // SSE connection
+    this.reconnectAttempts = 0;
     this.init();
   }
 
@@ -98,6 +100,26 @@ class WBRApp {
         throw new Error("Authentication expired");
       }
 
+      // Handle MFA required errors
+      if (response.status === 403) {
+        const errorData = await response.clone().json().catch(() => ({}));
+        if (errorData.error === 'MFA required') {
+          // Show MFA banner
+          const mfaBanner = document.getElementById('mfa-warning-banner');
+          if (mfaBanner) {
+            mfaBanner.classList.remove('hidden');
+          }
+          
+          // Disable admin buttons
+          document.querySelectorAll('.admin-only button').forEach(btn => {
+            btn.disabled = true;
+            btn.title = 'MFA required - please enroll TOTP';
+          });
+          
+          throw new Error(errorData.message || 'MFA required for this action');
+        }
+      }
+
       return response;
     } catch (error) {
       throw error;
@@ -106,10 +128,16 @@ class WBRApp {
 
   checkAuthState() {
     const jwt = localStorage.getItem("jwt");
-    const userRole = localStorage.getItem("userRole");
+    const userInfoStr = localStorage.getItem("userInfo");
 
-    if (jwt && userRole) {
-      this.showAuthenticated(userRole);
+    if (jwt && userInfoStr) {
+      try {
+        const userInfo = JSON.parse(userInfoStr);
+        this.showAuthenticated(userInfo);
+      } catch (e) {
+        // Invalid userInfo, logout
+        this.logout();
+      }
     } else {
       this.showUnauthenticated();
     }
@@ -131,14 +159,66 @@ class WBRApp {
     document.querySelector(`[data-tab="${tabName}"]`).classList.add("active");
   }
 
-  showAuthenticated(role) {
+  showAuthenticated(userInfo) {
     document.getElementById("auth-panel").classList.add("hidden");
     document
       .querySelectorAll(".protected-content")
       .forEach((el) => el.classList.remove("hidden"));
-    document.getElementById("user-info").textContent = `Logged in as ${role || 'user'}`;
+    
+    // Display user info with role/groups
+    const username = userInfo.username || userInfo;
+    const isAdmin = userInfo.isAdmin || false;
+    const groups = userInfo.groups || [];
+    
+    // ✅ WORKAROUND: Check manual MFA flag since Cognito doesn't include amr claim
+    const mfaVerifiedFlag = localStorage.getItem("mfaVerified") === "true";
+    const mfaSatisfied = mfaVerifiedFlag || userInfo.mfaSatisfied || false;
+    const roleText = isAdmin ? 'Admin' : 'User';
+    
+    // DEBUG: Log MFA status
+    console.log('🔐 MFA Status:', {
+      isAdmin,
+      mfaSatisfied,
+      mfaVerifiedFlag,
+      amr: userInfo.amr,
+      userInfo
+    });
+    
+    document.getElementById("user-info").textContent = `Logged in as ${username} (${roleText})`;
     document.getElementById("user-info").classList.remove("hidden");
     document.getElementById("logout-btn").classList.remove("hidden");
+    
+    // Show/hide admin-only controls (processing buttons only)
+    const adminControls = document.querySelectorAll('.admin-only');
+    adminControls.forEach(el => {
+      if (isAdmin) {
+        el.classList.remove('hidden');
+      } else {
+        el.classList.add('hidden');
+      }
+    });
+    
+    // Show MFA warning banner if admin but MFA not satisfied
+    const mfaBanner = document.getElementById('mfa-warning-banner');
+    if (isAdmin && !mfaSatisfied) {
+      console.log('⚠️  MFA NOT satisfied - disabling admin buttons');
+      mfaBanner.classList.remove('hidden');
+      
+      // Disable admin-only action buttons
+      document.querySelectorAll('.admin-only button').forEach(btn => {
+        btn.disabled = true;
+        btn.title = 'MFA required - please enroll TOTP';
+      });
+    } else {
+      console.log('✅ MFA satisfied - enabling admin buttons');
+      mfaBanner.classList.add('hidden');
+      
+      // Re-enable admin buttons
+      document.querySelectorAll('.admin-only button').forEach(btn => {
+        btn.disabled = false;
+        btn.title = '';
+      });
+    }
   }
 
   showUnauthenticated() {
@@ -151,8 +231,14 @@ class WBRApp {
   }
 
   logout() {
+    // Close SSE connection
+    this.disconnectSSE();
+    
     localStorage.removeItem("jwt");
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("mfaVerified");
     localStorage.removeItem("userRole");
+    localStorage.removeItem("userInfo");
     this.showUnauthenticated();
     this.showResult("login-result", "Logged out successfully", "success");
   }
@@ -197,11 +283,55 @@ class WBRApp {
 
       if (response.ok) {
         const data = await response.json();
-        // Use accessToken for API authentication (stateless)
-        localStorage.setItem("jwt", data.accessToken);
-        localStorage.setItem("userRole", username);
-        this.showAuthenticated(username);
-        this.showResult("login-result", "Login successful!", "success");
+        
+        // Check if MFA challenge is required
+        console.log('🔐 Login response:', data);
+        if (!data.success && data.challengeName === 'SOFTWARE_TOKEN_MFA') {
+          console.log('✅ MFA challenge detected, prompting for code');
+          // Prompt user for MFA code
+          const mfaCode = prompt('Enter the 6-digit code from your authenticator app:');
+          console.log('🔢 MFA code entered:', mfaCode ? 'Yes (6 digits)' : 'No (canceled)');
+          if (!mfaCode) {
+            this.showResult("login-result", "MFA code required to continue", "error");
+            return;
+          }
+          
+          console.log('📤 Sending MFA code to server...');
+          // Submit MFA code
+          const mfaResponse = await this.apiFetch("/v1/login", {
+            method: "POST",
+            body: JSON.stringify({ username, password, mfaCode, session: data.session }),
+          });
+          console.log('📥 MFA response received:', { ok: mfaResponse.ok, status: mfaResponse.status });
+          
+          if (mfaResponse.ok) {
+            const mfaData = await mfaResponse.json();
+            if (!mfaData.success) {
+              this.showResult("login-result", "Invalid MFA code", "error");
+              return;
+            }
+            // Continue with normal login flow
+            localStorage.setItem("jwt", mfaData.idToken);
+            localStorage.setItem("accessToken", mfaData.accessToken); // Store for MFA operations
+            localStorage.setItem("mfaVerified", "true"); // ✅ Flag that MFA was completed
+            await this.completeLogin(username);
+            return;
+          } else {
+            const error = await mfaResponse.json();
+            this.showResult("login-result", error.error || "MFA verification failed", "error");
+            return;
+          }
+        }
+        
+        // Normal login (no MFA)
+        if (data.success) {
+          // Use idToken for API authentication (contains MFA info via 'amr' claim)
+          localStorage.setItem("jwt", data.idToken);
+          localStorage.setItem("accessToken", data.accessToken); // Store for MFA operations
+          await this.completeLogin(username);
+        } else {
+          this.showResult("login-result", data.message || "Login failed", "error");
+        }
       } else {
         const error = await response.json();
         this.showResult("login-result", error.error, "error");
@@ -212,6 +342,27 @@ class WBRApp {
         `Login failed: ${error.message}`,
         "error"
       );
+    }
+  }
+
+  async completeLogin(username) {
+    try {
+      // Fetch user info including groups and MFA status
+      const userInfoResponse = await this.apiFetch("/v1/me");
+      if (userInfoResponse.ok) {
+        const userInfo = await userInfoResponse.json();
+        localStorage.setItem("userInfo", JSON.stringify(userInfo));
+        this.showAuthenticated(userInfo);
+      } else {
+        // Fallback if /me fails
+        this.showAuthenticated({ username, isAdmin: false, groups: [], mfaSatisfied: false });
+      }
+      
+      this.showResult("login-result", "Login successful!", "success");
+    } catch (error) {
+      console.error('Complete login error:', error);
+      this.showAuthenticated({ username, isAdmin: false, groups: [], mfaSatisfied: false });
+      this.showResult("login-result", "Login successful!", "success");
     }
   }
 
@@ -315,51 +466,137 @@ class WBRApp {
   async handleUpload(e) {
     e.preventDefault();
 
-    const formData = new FormData();
     const fileInput = document.getElementById("video-file");
     const titleInput = document.getElementById("title");
+    const file = fileInput.files[0];
 
-    if (!fileInput.files[0]) {
+    if (!file) {
       this.showResult("upload-result", "Please select a video file", "error");
       return;
     }
 
-    formData.append("file", fileInput.files[0]);
-    if (titleInput.value) {
-      formData.append("title", titleInput.value);
-    }
+    const btn = e.target.querySelector('button[type="submit"]');
+    const progressContainer = document.getElementById("upload-progress-container");
+    const progressBar = document.getElementById("upload-progress");
+    const progressText = document.getElementById("upload-progress-text");
 
     try {
-      const btn = e.target.querySelector('button[type="submit"]');
       this.setLoading(btn, true);
+      progressContainer.classList.remove("hidden");
+      progressBar.value = 0;
+      progressText.textContent = "0%";
 
-      const response = await this.apiFetch("/v1/meetings", {
+      // Step 1: Get presigned upload URL
+      this.showResult("upload-result", "Getting upload URL...", "info");
+      
+      const presignResponse = await this.apiFetch("/v1/files/presign-upload", {
         method: "POST",
-        body: formData,
+        body: JSON.stringify({
+          fileName: file.name,
+          fileType: file.type || 'application/octet-stream'
+        })
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        this.showResult(
-          "upload-result",
-          `Meeting created successfully! ID: ${data.meetingId}`,
-          "success"
-        );
-        document.getElementById("upload-form").reset();
-        this.loadMeetings(); // Refresh meetings list
-      } else {
-        const error = await response.json();
-        this.showResult("upload-result", error.error, "error");
+      if (!presignResponse.ok) {
+        const error = await presignResponse.json();
+        throw new Error(error.error || "Failed to get upload URL");
       }
+
+      const { uploadUrl, key, meetingId } = await presignResponse.json();
+
+      // Step 2: Upload file directly to S3 with progress tracking
+      this.showResult("upload-result", "Uploading to S3...", "info");
+      
+      await this.uploadToS3WithProgress(uploadUrl, file, (progress) => {
+        progressBar.value = progress;
+        progressText.textContent = `${progress}%`;
+      });
+
+      // Step 3: Register the meeting with sourceKey
+      this.showResult("upload-result", "Registering meeting...", "info");
+      
+      const registerResponse = await this.apiFetch("/v1/meetings", {
+        method: "POST",
+        body: JSON.stringify({
+          sourceKey: key,
+          title: titleInput.value || `Meeting ${new Date().toISOString().split('T')[0]}`
+        })
+      });
+
+      if (!registerResponse.ok) {
+        const error = await registerResponse.json();
+        throw new Error(error.error || "Failed to register meeting");
+      }
+
+      const data = await registerResponse.json();
+      
+      this.showResult(
+        "upload-result",
+        `Meeting created successfully! ID: ${data.meetingId}`,
+        "success"
+      );
+      
+      document.getElementById("upload-form").reset();
+      progressContainer.classList.add("hidden");
+      this.loadMeetings(); // Refresh meetings list
+      
     } catch (error) {
       this.showResult(
         "upload-result",
         `Upload failed: ${error.message}`,
         "error"
       );
+      progressContainer.classList.add("hidden");
     } finally {
-      this.setLoading(e.target.querySelector('button[type="submit"]'), false);
+      this.setLoading(btn, false);
     }
+  }
+
+  uploadToS3WithProgress(url, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable) {
+          const percentComplete = Math.round((e.loaded / e.total) * 100);
+          onProgress(percentComplete);
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        console.log('📥 S3 Response:', {
+          status: xhr.status,
+          statusText: xhr.statusText,
+          responseText: xhr.responseText.substring(0, 200)
+        });
+        
+        if (xhr.status === 200) {
+          console.log('✅ S3 upload successful!');
+          resolve();
+        } else {
+          console.error('❌ S3 upload failed:', {
+            status: xhr.status,
+            response: xhr.responseText
+          });
+          reject(new Error(`S3 upload failed with status ${xhr.status}: ${xhr.statusText}`));
+        }
+      });
+
+      xhr.addEventListener('error', (e) => {
+        console.error('❌ Network error during S3 upload:', e);
+        console.error('XHR details:', {
+          readyState: xhr.readyState,
+          status: xhr.status,
+          statusText: xhr.statusText
+        });
+        reject(new Error('Network error during S3 upload - check CORS configuration'));
+      });
+
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', file.type);
+      console.log('🔑 Request headers:', { 'Content-Type': file.type });
+      xhr.send(file);
+    });
   }
 
   async loadMeetings() {
@@ -410,6 +647,11 @@ class WBRApp {
                     }')">
                         View Details
                     </button>
+                    <button class="btn btn-danger btn-sm" onclick="app.deleteMeeting('${
+                      meeting.id
+                    }', '${meeting.title || "this meeting"}')">
+                        Delete
+                    </button>
                 </td>
             `;
       tbody.appendChild(row);
@@ -423,6 +665,9 @@ class WBRApp {
       const meeting = await response.json();
 
       this.renderMeetingDetails(meeting);
+      
+      // Start SSE connection for real-time updates
+      this.connectSSE(meetingId);
     } catch (error) {
       alert(`Failed to load meeting details: ${error.message}`);
     }
@@ -664,6 +909,264 @@ class WBRApp {
     }
   }
 
+  async deleteMeeting(meetingId, title) {
+    // Confirm deletion
+    const confirmed = confirm(`Are you sure you want to delete "${title}"?\n\nThis action cannot be undone.`);
+    
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const response = await this.apiFetch(`/v1/meetings/${meetingId}`, {
+        method: 'DELETE'
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Meeting deleted successfully!\n\n${data.deletedItems} items removed from database.`);
+        
+        // If we're viewing this meeting's details, close SSE and go back to list
+        if (this.currentMeetingId === meetingId) {
+          this.disconnectSSE();
+          this.currentMeetingId = null;
+          document.getElementById('meeting-details').classList.add('hidden');
+        }
+        
+        // Refresh meetings list
+        this.loadMeetings();
+      } else {
+        const error = await response.json();
+        alert(`Delete failed: ${error.message || error.error}`);
+      }
+    } catch (error) {
+      alert(`Delete failed: ${error.message}`);
+    }
+  }
+
+  // ===== Server-Sent Events (SSE) for Real-Time Updates =====
+
+  connectSSE(meetingId) {
+    // Close any existing connection
+    this.disconnectSSE();
+
+    const jwt = localStorage.getItem('jwt');
+    if (!jwt) {
+      console.warn('No JWT token, skipping SSE connection');
+      return;
+    }
+
+    console.log(`📡 Connecting SSE for meeting ${meetingId}...`);
+
+    // EventSource doesn't support custom headers, so we pass token as query param
+    // Alternative: use fetch with ReadableStream for SSE
+    const url = `/v1/meetings/${meetingId}/events?token=${encodeURIComponent(jwt)}`;
+    
+    // Using fetch + ReadableStream for SSE with custom headers
+    this.connectSSEWithFetch(meetingId);
+  }
+
+  async connectSSEWithFetch(meetingId) {
+    const jwt = localStorage.getItem('jwt');
+    
+    try {
+      const response = await fetch(`/v1/meetings/${meetingId}/events`, {
+        headers: {
+          'Authorization': `Bearer ${jwt}`,
+          'Accept': 'text/event-stream'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`SSE connection failed: ${response.status}`);
+      }
+
+      // Hide connection banner on successful connect
+      this.hideConnectionBanner();
+      this.reconnectAttempts = 0;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // Read stream
+      const processStream = async () => {
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) {
+              console.log('📡 SSE stream ended');
+              this.handleSSEDisconnect(meetingId);
+              break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || ''; // Keep incomplete message in buffer
+
+            // Process complete messages
+            for (const message of lines) {
+              if (message.trim()) {
+                this.handleSSEMessage(message, meetingId);
+              }
+            }
+          }
+        } catch (error) {
+          console.error('📡 SSE stream read error:', error);
+          this.handleSSEDisconnect(meetingId);
+        }
+      };
+
+      // Store reader for cleanup
+      this.sseReader = reader;
+      this.currentSSEMeetingId = meetingId;
+
+      // Start processing
+      processStream();
+
+    } catch (error) {
+      console.error('📡 SSE connection error:', error);
+      this.handleSSEDisconnect(meetingId);
+    }
+  }
+
+  handleSSEMessage(message, meetingId) {
+    // Parse SSE message format: "event: eventName\ndata: {...}"
+    const lines = message.split('\n');
+    let event = 'message';
+    let data = '';
+
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        event = line.substring(6).trim();
+      } else if (line.startsWith('data:')) {
+        data = line.substring(5).trim();
+      } else if (line.startsWith(':')) {
+        // Keepalive ping, ignore
+        return;
+      }
+    }
+
+    if (!data) return;
+
+    try {
+      const payload = JSON.parse(data);
+
+      switch (event) {
+        case 'connected':
+          console.log('📡 SSE connected:', payload);
+          this.hideConnectionBanner();
+          break;
+
+        case 'status':
+          console.log('📡 Meeting status update:', payload);
+          // Update UI with new status without full page refresh
+          this.updateMeetingStatus(payload);
+          break;
+
+        case 'error':
+          console.error('📡 SSE error event:', payload);
+          break;
+
+        case 'connectionLost':
+          console.log('📡 Server closing connection');
+          break;
+
+        default:
+          console.log('📡 Unknown SSE event:', event, payload);
+      }
+    } catch (error) {
+      console.error('Failed to parse SSE data:', error, data);
+    }
+  }
+
+  updateMeetingStatus(status) {
+    // Update status badge
+    const statusEl = document.getElementById('meeting-status');
+    if (statusEl) {
+      statusEl.textContent = status.status;
+    }
+
+    // If new data is available (renditions, captions, actions), reload details
+    if (status.hasRenditions || status.hasCaptions || status.hasActions) {
+      console.log('📡 New content available, reloading details...');
+      // Reload full meeting details to show new renditions/captions/actions
+      this.loadMeetingDetails(status.meetingId);
+    }
+  }
+
+  handleSSEDisconnect(meetingId) {
+    console.log('📡 SSE disconnected, showing banner and scheduling reconnect...');
+    
+    // Show connection banner
+    this.showConnectionBanner();
+
+    // Only reconnect if we're still viewing this meeting
+    if (this.currentMeetingId === meetingId) {
+      this.reconnectAttempts++;
+      const retryDelay = Math.min(5000 * this.reconnectAttempts, 30000); // Max 30s
+      
+      console.log(`📡 Reconnecting in ${retryDelay}ms (attempt ${this.reconnectAttempts})...`);
+      
+      setTimeout(() => {
+        if (this.currentMeetingId === meetingId) {
+          // Re-sync state from API before reconnecting
+          this.resyncMeetingState(meetingId);
+          this.connectSSEWithFetch(meetingId);
+        }
+      }, retryDelay);
+    }
+  }
+
+  async resyncMeetingState(meetingId) {
+    console.log('📡 Re-syncing meeting state from API...');
+    try {
+      const response = await this.apiFetch(`/v1/meetings/${meetingId}`);
+      if (response.ok) {
+        const meeting = await response.json();
+        this.renderMeetingDetails(meeting);
+        console.log('📡 State re-synced successfully');
+      }
+    } catch (error) {
+      console.error('Failed to re-sync state:', error);
+    }
+  }
+
+  disconnectSSE() {
+    if (this.sseReader) {
+      console.log('📡 Closing SSE connection...');
+      try {
+        this.sseReader.cancel();
+      } catch (e) {
+        // Ignore errors during cleanup
+      }
+      this.sseReader = null;
+      this.currentSSEMeetingId = null;
+      this.reconnectAttempts = 0;
+      this.hideConnectionBanner();
+    }
+  }
+
+  showConnectionBanner() {
+    const banner = document.getElementById('connection-banner');
+    const retryCount = document.getElementById('connection-retry-count');
+    
+    if (banner) {
+      banner.classList.remove('hidden');
+      if (retryCount) {
+        retryCount.textContent = `Reconnection attempt ${this.reconnectAttempts}...`;
+      }
+    }
+  }
+
+  hideConnectionBanner() {
+    const banner = document.getElementById('connection-banner');
+    if (banner) {
+      banner.classList.add('hidden');
+    }
+  }
+
   async generateReport(e) {
     e.preventDefault();
 
@@ -776,6 +1279,131 @@ class WBRApp {
     element.innerHTML = message;
     element.className = `result ${type}`;
     element.classList.remove("hidden");
+  }
+
+  // ===== MFA Enrollment Methods =====
+
+  openMFAModal() {
+    document.getElementById('mfa-modal').classList.remove('hidden');
+    // Reset modal state
+    document.getElementById('mfa-step-1').classList.remove('hidden');
+    document.getElementById('mfa-step-2').classList.add('hidden');
+    document.getElementById('qr-code-image').classList.add('hidden');
+    document.getElementById('secret-code-text').classList.add('hidden');
+    document.getElementById('qr-code-loading').textContent = 'Click "Generate QR Code" to begin...';
+    document.getElementById('mfa-code-input').value = '';
+    document.getElementById('mfa-verify-result').classList.add('hidden');
+  }
+
+  closeMFAModal() {
+    document.getElementById('mfa-modal').classList.add('hidden');
+  }
+
+  async generateMFAQR() {
+    const btn = document.getElementById('generate-qr-btn');
+    const loading = document.getElementById('qr-code-loading');
+    const qrImage = document.getElementById('qr-code-image');
+    const secretText = document.getElementById('secret-code-text');
+    
+    try {
+      this.setLoading(btn, true);
+      loading.textContent = 'Generating QR code...';
+
+      // Use access token for MFA setup (not ID token)
+      const accessToken = localStorage.getItem('accessToken');
+      if (!accessToken) {
+        throw new Error('Access token not found. Please log in again.');
+      }
+
+      const response = await fetch('/v1/mfa/setup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        
+        // Display QR code using qrserver.com API
+        const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(data.qrCodeData)}`;
+        qrImage.src = qrCodeUrl;
+        qrImage.classList.remove('hidden');
+        
+        // Show secret code as backup
+        secretText.textContent = `Manual Entry Code: ${data.secretCode}`;
+        secretText.classList.remove('hidden');
+        
+        loading.textContent = '';
+        btn.classList.add('hidden');
+        
+        // Show step 2 (code entry)
+        document.getElementById('mfa-step-2').classList.remove('hidden');
+      } else {
+        const error = await response.json();
+        loading.textContent = `Error: ${error.error}`;
+        loading.style.color = 'red';
+      }
+    } catch (error) {
+      loading.textContent = `Error: ${error.message}`;
+      loading.style.color = 'red';
+    } finally {
+      this.setLoading(btn, false);
+    }
+  }
+
+  async verifyMFACode() {
+    const mfaCode = document.getElementById('mfa-code-input').value.trim();
+    const resultDiv = document.getElementById('mfa-verify-result');
+    
+    if (!mfaCode || mfaCode.length !== 6) {
+      resultDiv.textContent = 'Please enter a 6-digit code';
+      resultDiv.className = 'result error';
+      resultDiv.classList.remove('hidden');
+      return;
+    }
+
+    try {
+      resultDiv.textContent = 'Verifying code...';
+      resultDiv.className = 'result info';
+      resultDiv.classList.remove('hidden');
+
+      // Use access token for MFA verify (not ID token)
+      const accessToken = localStorage.getItem('accessToken');
+      if (!accessToken) {
+        throw new Error('Access token not found. Please log in again.');
+      }
+
+      const response = await fetch('/v1/mfa/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({ mfaCode }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        resultDiv.textContent = `${data.message} Refreshing...`;
+        resultDiv.className = 'result success';
+        
+        // Wait 2 seconds then logout to force re-login with MFA
+        setTimeout(() => {
+          this.logout();
+          alert('MFA enabled! Please log in again. You will now be asked for a 6-digit code from your authenticator app.');
+          this.closeMFAModal();
+        }, 2000);
+      } else {
+        const error = await response.json();
+        resultDiv.textContent = error.error || 'Verification failed';
+        resultDiv.className = 'result error';
+      }
+    } catch (error) {
+      resultDiv.textContent = `Error: ${error.message}`;
+      resultDiv.className = 'result error';
+    }
   }
 }
 

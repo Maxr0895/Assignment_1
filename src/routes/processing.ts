@@ -2,7 +2,7 @@ import { Router } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { authRequired } from '../middleware/auth';
+import { authRequired, requireGroup } from '../middleware/auth';
 import { s3Service } from '../services/s3';
 import { ddbService } from '../services/ddb';
 import { FFmpegService } from '../services/ffmpegService';
@@ -29,7 +29,9 @@ router.use((req, res, next) => {
  * Transcode video: download from S3, process with ffmpeg, upload outputs to S3
  * Supports idempotency via Idempotency-Key header
  */
-router.post('/:id/transcode', authRequired, async (req, res) => {
+// Note: MFA enforcement removed due to USER_PASSWORD_AUTH flow limitation (doesn't include amr claim)
+// MFA is still enforced at enrollment and frontend UI level
+router.post('/:id/transcode', authRequired, requireGroup('Admin'), async (req, res) => {
   let tempDir: string | null = null;
   const meetingId = req.params.id;
   const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
@@ -57,8 +59,10 @@ router.post('/:id/transcode', authRequired, async (req, res) => {
     tempDir = await makeTempDir('transcode');
     
     // Download input from S3
-    const inputExtension = meeting.originalFilename?.split('.').pop() || 'mp4';
-    const inputS3Key = `${meeting.s3Prefix}/input.${inputExtension}`;
+    // Use the actual uploaded filename (for presigned uploads) or default to input.{ext}
+    const originalFilename = meeting.originalFilename || 'input.mp4';
+    const inputExtension = originalFilename.split('.').pop() || 'mp4';
+    const inputS3Key = `${meeting.s3Prefix}/${originalFilename}`;
     const inputTempPath = path.join(tempDir, `input.${inputExtension}`);
     
     console.log(`📥 Downloading from S3: ${inputS3Key}`);
@@ -181,7 +185,7 @@ router.post('/:id/transcode', authRequired, async (req, res) => {
  * Transcribe audio: download from S3, transcribe, upload captions to S3
  * Supports idempotency via Idempotency-Key header
  */
-router.post('/:id/transcribe', authRequired, async (req, res) => {
+router.post('/:id/transcribe', authRequired, requireGroup('Admin'), async (req, res) => {
   let tempDir: string | null = null;
   const meetingId = req.params.id;
   const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
@@ -212,7 +216,7 @@ router.post('/:id/transcribe', authRequired, async (req, res) => {
     const audioS3Key = `${meeting.s3Prefix}/audio.mp3`;
     const audioTempPath = path.join(tempDir, 'audio.mp3');
     
-    if (openaiService.isAvailable() && !manualTranscript) {
+    if (await openaiService.isAvailable() && !manualTranscript) {
       try {
         console.log('📥 Downloading audio from S3...');
         const getCommand = new GetObjectCommand({
@@ -312,7 +316,7 @@ router.post('/:id/transcribe', authRequired, async (req, res) => {
  * Extract action items from transcript
  * Supports idempotency via Idempotency-Key header
  */
-router.post('/:id/actions', authRequired, async (req, res) => {
+router.post('/:id/actions', authRequired, requireGroup('Admin'), async (req, res) => {
   const meetingId = req.params.id;
   const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
 
@@ -339,7 +343,7 @@ router.post('/:id/actions', authRequired, async (req, res) => {
     const segments = captions.segments;
     let actionItems: any[] = [];
     
-    if (openaiService.isAvailable()) {
+    if (await openaiService.isAvailable()) {
       // Use OpenAI action extraction
       actionItems = await openaiService.extractActions(segments);
     } else {

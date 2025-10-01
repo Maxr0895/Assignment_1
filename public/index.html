@@ -16,6 +16,26 @@
             </div>
         </header>
 
+        <!-- Connection Status Banner (shown when SSE disconnects) -->
+        <div id="connection-banner" class="panel hidden" style="background-color: #fee2e2; border-left: 4px solid #ef4444;">
+            <h3 style="color: #991b1b; margin: 0 0 0.5rem 0;">⚠️ Live updates disconnected, retrying...</h3>
+            <p style="color: #7f1d1d; margin: 0;">
+                Real-time status updates are currently unavailable. The app will automatically reconnect.
+                <br>
+                <small id="connection-retry-count"></small>
+            </p>
+        </div>
+
+        <!-- MFA Warning Banner (shown when admin but MFA not enrolled) -->
+        <div id="mfa-warning-banner" class="panel hidden" style="background-color: #fef3c7; border-left: 4px solid #f59e0b;" onclick="app.openMFAModal()">
+            <h3 style="color: #92400e; margin: 0 0 0.5rem 0;">⚠️ MFA Required for Admin Actions</h3>
+            <p style="color: #78350f; margin: 0;">
+                Multi-factor authentication is required for admin operations (transcode, transcribe, extract actions).
+                <br>
+                <strong>Click here to enroll MFA</strong> - Scan a QR code with your authenticator app (Google Authenticator, Authy, etc.) and enter a 6-digit code.
+            </p>
+        </div>
+
         <!-- Health Check Panel -->
         <section class="panel">
             <h2>System Health</h2>
@@ -118,17 +138,24 @@
         <!-- Upload Panel -->
         <section class="panel protected-content hidden">
             <h2>Upload Meeting</h2>
+            
+            <!-- Upload form - visible to all authenticated users -->
             <form id="upload-form" enctype="multipart/form-data">
-                <div class="form-group">
-                    <label for="title">Meeting Title:</label>
-                    <input type="text" id="title" placeholder="Optional meeting title">
-                </div>
-                <div class="form-group">
-                    <label for="video-file">Video File:</label>
-                    <input type="file" id="video-file" accept="video/*" required>
-                    <small>Upload an MP4 video file</small>
-                </div>
-                <button type="submit" class="btn btn-primary">Upload Meeting</button>
+                    <div class="form-group">
+                        <label for="title">Meeting Title:</label>
+                        <input type="text" id="title" placeholder="Optional meeting title">
+                    </div>
+                    <div class="form-group">
+                        <label for="video-file">Video File:</label>
+                        <input type="file" id="video-file" accept="video/*" required>
+                        <small>Upload a video file (MP4, WebM, etc.)</small>
+                    </div>
+                    <div id="upload-progress-container" class="form-group hidden">
+                        <label>Upload Progress:</label>
+                        <progress id="upload-progress" value="0" max="100" style="width: 100%; height: 25px;"></progress>
+                        <span id="upload-progress-text">0%</span>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Upload Meeting</button>
             </form>
             <div id="upload-result" class="result hidden"></div>
         </section>
@@ -171,7 +198,7 @@
                     <p>Duration: <span id="meeting-duration"></span></p>
                 </div>
                 
-                <div class="processing-controls">
+                <div class="processing-controls admin-only">
                     <button id="transcode-btn" class="btn btn-primary">Transcode Video</button>
                     <button id="transcribe-btn" class="btn btn-primary">Generate Transcript</button>
                     <button id="extract-actions-btn" class="btn btn-primary">Extract Actions</button>
@@ -222,6 +249,32 @@
             </form>
             <div id="report-result" class="result hidden"></div>
         </section>
+    </div>
+
+    <!-- MFA Enrollment Modal -->
+    <div id="mfa-modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close-modal" onclick="app.closeMFAModal()">&times;</span>
+            <h2>Setup Multi-Factor Authentication</h2>
+            
+            <div id="mfa-step-1">
+                <p>Scan the QR code below with your authenticator app (Google Authenticator, Authy, Microsoft Authenticator, etc.)</p>
+                <div id="qr-code-container" style="text-align: center; margin: 20px 0;">
+                    <div id="qr-code-loading">Click "Generate QR Code" to begin...</div>
+                    <img id="qr-code-image" class="hidden" style="max-width: 300px;" />
+                </div>
+                <p id="secret-code-text" class="hidden" style="font-family: monospace; background: #f0f0f0; padding: 10px; word-break: break-all;"></p>
+                <button id="generate-qr-btn" class="btn btn-primary" onclick="app.generateMFAQR()">Generate QR Code</button>
+            </div>
+            
+            <div id="mfa-step-2" class="hidden">
+                <p>Enter the 6-digit code from your authenticator app to complete setup:</p>
+                <input type="text" id="mfa-code-input" placeholder="123456" maxlength="6" pattern="[0-9]{6}" style="width: 150px; text-align: center; font-size: 24px; padding: 10px;" />
+                <br><br>
+                <button class="btn btn-primary" onclick="app.verifyMFACode()">Verify & Enable MFA</button>
+                <div id="mfa-verify-result" class="result hidden"></div>
+            </div>
+        </div>
     </div>
 
     <script src="app.js"></script>

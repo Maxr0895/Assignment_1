@@ -57,6 +57,31 @@ export class S3Service {
   }
 
   /**
+   * Generate a presigned PUT URL for uploading directly to S3
+   * @param key - S3 object key where the file will be stored
+   * @param contentType - MIME type of the file to be uploaded
+   * @param expiresInSeconds - URL expiration time (default: 15 minutes)
+   * @returns Presigned URL string
+   */
+  async getPresignedPutUrl(
+    key: string, 
+    contentType: string, 
+    expiresInSeconds = 900
+  ): Promise<string> {
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ContentType: contentType
+    });
+
+    const url = await getSignedUrl(s3Client, command, {
+      expiresIn: expiresInSeconds
+    });
+
+    return url;
+  }
+
+  /**
    * Delete an object from S3
    * @param key - S3 object key
    */

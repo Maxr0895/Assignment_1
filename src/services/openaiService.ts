@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import { config } from '../config';
+import { getOpenAIKey } from './secrets';
 
 interface TranscriptSegment {
   start: number;
@@ -22,31 +23,69 @@ interface ActionItem {
 
 export class OpenAIService {
   private client?: OpenAI;
+  private initPromise?: Promise<void>;
+  private initialized = false;
   
   constructor() {
-    if (config.openaiApiKey) {
-      // Create a custom HTTPS agent with keepAlive to prevent ECONNRESET
-      const httpsAgent = new https.Agent({
-        keepAlive: true,
-        keepAliveMsecs: 30000,
-        maxSockets: 50,
-        timeout: 300000
-      });
-
-      this.client = new OpenAI({
-        apiKey: config.openaiApiKey,
-        maxRetries: 3,
-        timeout: 300000, // 5 minutes
-        httpAgent: httpsAgent
-      });
-    }
+    // Lazy initialization - client will be created on first use
   }
   
-  isAvailable(): boolean {
+  /**
+   * Initialize the OpenAI client with API key from Secrets Manager or environment
+   */
+  private async initialize(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+
+    if (this.initPromise) {
+      await this.initPromise;
+      return;
+    }
+
+    this.initPromise = (async () => {
+      try {
+        const apiKey = await getOpenAIKey();
+        
+        if (apiKey) {
+          // Create a custom HTTPS agent with keepAlive to prevent ECONNRESET
+          const httpsAgent = new https.Agent({
+            keepAlive: true,
+            keepAliveMsecs: 30000,
+            maxSockets: 50,
+            timeout: 300000
+          });
+
+          this.client = new OpenAI({
+            apiKey,
+            maxRetries: 3,
+            timeout: 300000, // 5 minutes
+            httpAgent: httpsAgent
+          });
+
+          console.log('✅ OpenAI client initialized');
+        } else {
+          console.log('⚠️  OpenAI API key not available');
+        }
+
+        this.initialized = true;
+      } catch (error) {
+        console.error('❌ Failed to initialize OpenAI client:', error);
+        this.initialized = true; // Mark as initialized to prevent infinite retries
+      }
+    })();
+
+    await this.initPromise;
+  }
+  
+  async isAvailable(): Promise<boolean> {
+    await this.initialize();
     return !!this.client;
   }
   
   async transcribeAudio(audioPath: string): Promise<TranscriptSegment[]> {
+    await this.initialize();
+    
     if (!this.client) {
       throw new Error('OpenAI client not available');
     }
@@ -128,6 +167,8 @@ export class OpenAIService {
   }
   
   async extractActions(segments: TranscriptSegment[]): Promise<ActionItem[]> {
+    await this.initialize();
+    
     if (!this.client) {
       throw new Error('OpenAI client not available');
     }
@@ -233,3 +274,6 @@ export class OpenAIService {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
   }
 }
+
+// Export singleton instance
+export const openaiService = new OpenAIService();

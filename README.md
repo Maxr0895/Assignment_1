@@ -1,370 +1,152 @@
-# WBR Actionizer (Stateless)
+# WBR Actionizer
 
-A fully **stateless** REST API for Weekly Business Review action item extraction from video meetings. Features CPU-intensive video transcoding, AWS Cognito authentication, S3/DynamoDB storage, and optional OpenAI integration.
+Modern stateless Node.js/TypeScript API for managing Weekly Business Review meeting assets. Upload large video files directly to S3, track processing state in DynamoDB, drive media workflows (transcode, transcribe, extract actions) and secure the system end‑to‑end with AWS Cognito, Secrets Manager and Parameter Store. The entire stack is Docker ready and deployable to EC2.
 
-## 🚀 Key Features
+---
 
-- **Fully Stateless**: No sessions, no local storage - all state in S3 & DynamoDB
-- **AWS Cognito Auth**: Pure bearer token authentication with JWT verification
-- **S3 Storage**: All media files stored in AWS S3 with presigned URLs
-- **DynamoDB**: Single-table design for all metadata
-- **Idempotent Operations**: Retry-safe with Idempotency-Key support
-- **Temp File Hygiene**: Automatic cleanup of ffmpeg intermediate files
-- **Status Tracking**: Meeting processing status persisted in DynamoDB
-- **Docker Ready**: Containerized deployment with zero local dependencies
-
-## 📋 Prerequisites
-
-- Node.js 20+
-- AWS Account with:
-  - S3 bucket created
-  - DynamoDB table created (partition key: `qut-username`, sort key: `sk`)
-  - Cognito User Pool with app client configured
-- FFmpeg installed (for local development)
-
-## 🏃 Quick Start
-
-### 1. Clone and Install
+## Quick Start
 
 ```bash
-git clone <your-repo>
+git clone <repo>
 cd Assignment_1
 npm install
+cp env.example .env      # fill with your AWS + Cognito values
+npm run dev              # launches http://localhost:8080
 ```
 
-### 2. Configure Environment
+> Requires Node.js 20+, FFmpeg installed locally, and AWS Academy credentials with access to S3, DynamoDB, Cognito, Secrets Manager and SSM Parameter Store.
 
-```bash
-cp env.example .env
-# Edit .env with your AWS credentials and Cognito details
-```
 
-**Required environment variables**:
-```env
-# Server
-PORT=8080
-JWT_SECRET=your_jwt_secret_here
+## Environment Variables
 
-# AWS Services
-AWS_REGION=ap-southeast-2
-S3_BUCKET=your-bucket-name
-DDB_TABLE=your-table-name
-QUT_USERNAME=n12345678@qut.edu.au
+`env.example` documents every setting used across environments. Highlighted values:
 
-# AWS Credentials (from AWS Academy)
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-AWS_SESSION_TOKEN=your_session_token
+| Variable | Purpose |
+| --- | --- |
+| `AWS_REGION` | Region for all AWS resources (`ap-southeast-2`). |
+| `S3_BUCKET` | Bucket for meeting objects (`meetings/{uuid}/...`). |
+| `DDB_TABLE` | DynamoDB table name (single-table design). |
+| `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID` | Credentials for Cognito user pool. |
+| `OPENAI_SECRET_NAME` | Secrets Manager secret with OpenAI key (falls back to `OPENAI_API_KEY` locally). |
+| `API_BASE_URL_PARAM` | SSM Parameter storing public API base URL. |
+| `FFMPEG_PATH` | Absolute FFmpeg path (Windows path in `.env` is already set up). |
 
-# Cognito
-COGNITO_USER_POOL_ID=your-pool-id
-COGNITO_CLIENT_ID=your-client-id
 
-# FFmpeg
-FFMPEG_PATH=/usr/bin/ffmpeg  # or C:\path\to\ffmpeg.exe on Windows
+## Features Overview
 
-# Optional
-OPENAI_API_KEY=sk-...
-```
+- **Direct S3 uploads** using presigned URLs (PUT) with progress reporting.
+- **Stateless JWT authentication** via Cognito; no sessions, pure bearer tokens.
+- **Role + MFA aware UI** – Admin/Users groups decide who can process jobs. Admin actions require TOTP enrollment and verification.
+- **DynamoDB single-table design** tracks meetings, captions, renditions, actions and idempotency keys.
+- **Idempotent processing routes** (custom `Idempotency-Key` header).
+- **Server-Sent Events channel** for polling-free status updates with auto‑reconnect.
+- **OpenAI Whisper + GPT integration** for transcripts and action extraction, with Secrets Manager based key retrieval.
+- **Config bootstrap via SSM** so deployments always discover the canonical API base URL.
+- **Docker + ECR friendly** pipeline for EC2 deployments.
 
-### 3. Register a User
 
-```bash
-# Register
-curl -X POST http://localhost:8080/v1/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "testuser",
-    "email": "test@example.com",
-    "password": "Test1234!"
-  }'
+## Running the Workflows
 
-# Confirm (use code from email)
-curl -X POST http://localhost:8080/v1/confirm \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "testuser",
-    "code": "123456"
-  }'
-```
+1. **Authenticate** via `/v1/login` (returns `accessToken`, `idToken`). Store the `idToken` client-side for API calls.
+2. **Upload**: UI performs: presign (`/v1/files/presign-upload`) → PUT to S3 with progress → register meeting (`/v1/meetings`).
+3. **Process** (admin only): trigger `/transcode`, `/transcribe`, `/actions` endpoints. Each creates temp dirs, downloads source from S3, performs ffmpeg/OpenAI work, writes artifacts back to S3/DynamoDB, then deletes temp files.
+4. **Monitor** meeting detail page. SSE endpoint `/v1/meetings/:id/events` streams status updates and auto-resyncs state after disconnects.
+5. **Delete** meetings via `DELETE /v1/meetings/:id` (owner or Admin). Removes all DynamoDB metadata while leaving S3 artifacts intact.
 
-### 4. Run the Server
 
-```bash
-npm run dev
-```
-
-Visit `http://localhost:8080` to access the web UI.
-
-## 🔐 Authentication Flow
-
-**100% stateless - no sessions!**
-
-1. **Register**: `POST /v1/register` → creates Cognito user
-2. **Confirm**: `POST /v1/confirm` → verifies email with code
-3. **Login**: `POST /v1/login` → returns `accessToken` and `idToken`
-4. **API Calls**: Include `Authorization: Bearer <accessToken>` header
-
-```bash
-# Login
-RESPONSE=$(curl -s -X POST http://localhost:8080/v1/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"testuser","password":"Test1234!"}')
-
-# Extract access token
-TOKEN=$(echo $RESPONSE | jq -r '.accessToken')
-
-# Use in API calls
-curl -X GET http://localhost:8080/v1/meetings \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-## 📡 API Endpoints
-
-### Authentication (Public)
-
-- `POST /v1/register` - Register new user
-- `POST /v1/confirm` - Confirm email with code
-- `POST /v1/login` - Login (returns JWT tokens)
-- `POST /v1/reset-password` - Reset password with code
-
-### Meetings (Protected)
-
-- `POST /v1/meetings` - Upload video (multipart form)
-- `GET /v1/meetings` - List meetings
-- `GET /v1/meetings/:id` - Get meeting details with presigned URLs
-
-### Processing (Protected)
-
-- `POST /v1/meetings/:id/transcode` - Transcode video (CPU-intensive)
-- `POST /v1/meetings/:id/transcribe` - Generate transcript
-- `POST /v1/meetings/:id/actions` - Extract action items
-
-### Reports (Protected)
-
-- `GET /v1/reports/wbr-summary` - Weekly business review summary
-
-### Health
-
-- `GET /health` - Health check (public)
-
-## 🔄 Stateless Operation
-
-### Status Tracking
-
-Meeting status is persisted in DynamoDB:
-- `uploaded` → `processing` → `done` | `failed`
-
-```bash
-# Check meeting status
-curl http://localhost:8080/v1/meetings/MEETING_ID \
-  -H "Authorization: Bearer $TOKEN" | jq '.status'
-```
-
-### Idempotency
-
-Add `Idempotency-Key` header to prevent duplicate processing:
-
-```bash
-curl -X POST http://localhost:8080/v1/meetings/MEETING_ID/transcode \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Idempotency-Key: unique-key-123"
-```
-
-### Temp File Cleanup
-
-All ffmpeg operations use `os.tmpdir()` with automatic cleanup:
-- Temp directory created per operation
-- Files cleaned up in `finally` block
-- No persistent local storage
-
-## 🐳 Docker Deployment
-
-### Build
-
-```bash
-docker build -t wbr-actionizer .
-```
-
-### Run
-
-```bash
-docker run -d \
-  -p 8080:8080 \
-  -e AWS_REGION=ap-southeast-2 \
-  -e S3_BUCKET=your-bucket \
-  -e DDB_TABLE=your-table \
-  -e QUT_USERNAME=n12345678@qut.edu.au \
-  -e AWS_ACCESS_KEY_ID=... \
-  -e AWS_SECRET_ACCESS_KEY=... \
-  -e AWS_SESSION_TOKEN=... \
-  -e COGNITO_USER_POOL_ID=... \
-  -e COGNITO_CLIENT_ID=... \
-  -e JWT_SECRET=prod-secret \
-  --name wbr \
-  wbr-actionizer
-```
-
-### EC2 Deployment
-
-1. **Push to ECR**:
-```bash
-aws ecr create-repository --repository-name wbr-actionizer
-docker tag wbr-actionizer:latest ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
-docker push ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
-```
-
-2. **Run on EC2** (with IAM role for S3/DynamoDB):
-```bash
-docker pull ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
-docker run -d -p 80:8080 \
-  -e AWS_REGION=ap-southeast-2 \
-  -e S3_BUCKET=... \
-  -e DDB_TABLE=... \
-  -e QUT_USERNAME=... \
-  -e COGNITO_USER_POOL_ID=... \
-  -e COGNITO_CLIENT_ID=... \
-  -e JWT_SECRET=... \
-  ACCOUNT.dkr.ecr.REGION.amazonaws.com/wbr-actionizer:latest
-```
-
-## ✅ Acceptance Tests
-
-### Test Stateless Operation
-
-1. **Upload and transcode a video**:
-```bash
-MEETING_ID=$(curl -X POST http://localhost:8080/v1/meetings \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "file=@test.mp4" | jq -r '.meetingId')
-
-curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-2. **Kill the container mid-processing**:
-```bash
-docker rm -f wbr
-```
-
-3. **Restart the container**:
-```bash
-docker run -d -p 8080:8080 ... --name wbr wbr-actionizer
-```
-
-4. **Re-trigger transcode** (should safely overwrite):
-```bash
-curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-**Expected**:
-- ✅ S3 objects and DynamoDB items are intact
-- ✅ Re-running completes successfully
-- ✅ Status updates to `done`
-
-### Test Idempotency
-
-```bash
-# Run twice with same key
-curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Idempotency-Key: test-123"
-
-curl -X POST http://localhost:8080/v1/meetings/$MEETING_ID/transcode \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Idempotency-Key: test-123"
-```
-
-**Expected**:
-- ✅ Second request returns cached result immediately
-
-## 🏗️ Architecture
-
-### Single-Table DynamoDB Design
-
-**Partition Key**: `qut-username` (always your QUT email)  
-**Sort Key**: `sk` (entity type + ID)
-
-Entity types:
-- `MEETING#<uuid>` - Meeting metadata + status
-- `REND#<meetingId>#<resolution>` - Rendition metadata
-- `CAPTIONS#<meetingId>` - Caption metadata
-- `ACTION#<meetingId>#<actionId>` - Action item
-- `IDEMP#<key>` - Idempotency tracking (24h TTL)
-
-### S3 Storage Pattern
+## Project Structure
 
 ```
-meetings/<meetingId>/
-  input.mp4
-  out_1080p.mp4
-  out_720p.mp4
-  audio.mp3
-  captions.srt
-  captions.vtt
-  thumbs_0.jpg
-  thumbs_2.jpg
-  ...
+src/
+  server.ts                # Express bootstrap (CORS, routes, health)
+  config.ts                # Env parsing + shared config
+  routes/
+    auth.ts                # Registration/Login/MFA setup
+    meetings.ts            # Upload, list, detail, delete
+    processing.ts          # Transcode/Transcribe/Actions
+    files.ts               # Presigned upload/download URLs
+    events.ts              # SSE endpoint
+    reports.ts             # WBR summary API
+    config.ts              # Public config (`apiBaseUrl`)
+  middleware/auth.ts       # Cognito token verification + RBAC helpers
+  services/
+    ddb.ts                 # DynamoDB queries & idempotency logic
+    s3.ts                  # S3 client + pre-signed helpers
+    ffmpegService.ts       # Transcoding orchestration
+    openaiService.ts       # Whisper/GPT calls (lazy init)
+    secrets.ts             # Secrets Manager fetch + caching
+    ssm.ts                 # Parameter Store fetch + caching
+    cognitoAuth.ts         # Direct Cognito API operations
+  utils/temp.ts            # Temp directory lifecycle helpers
+
+public/
+  index.html, app.js, styles.css # Browser UI with upload + admin dashboards
+
+docs/
+  (screenshots referenced in README sections)
 ```
 
-All file access via presigned URLs (expire in 1 hour).
 
-### Temp File Lifecycle
+## Key AWS Integrations
 
-```typescript
-let tempDir = await makeTempDir('transcode');
-try {
-  // Download from S3 → tempDir
-  // Process with ffmpeg
-  // Upload to S3
-} finally {
-  await cleanupDir(tempDir); // Always cleanup
-}
-```
+### S3 Bucket `a2-n8501645`
+- Stores original uploads (`meetings/{uuid}/input.ext`), renditions, audio extracts, captions, thumbnails.
+- Bucket CORS must allow PUT/GET from frontend origins and expose headers required for browser uploads.
 
-## 📊 Project Structure
+### DynamoDB Table `a2-n8501645`
+- Partition key: fixed QUT username. Sort key encodes entity type (e.g., `MEETING#uuid`).
+- Additional sort key prefixes: `REND#`, `CAPTIONS#`, `ACTION#`, `IDEMP#` etc.
+- Items include processing `status`, `lastUpdatedAt`, original filename, S3 prefixes and computed metadata.
 
-```
-/src
-  server.ts           # Express setup (NO sessions)
-  config.ts          # Environment config
-  /middleware
-    auth.ts          # JWT verification with aws-jwt-verify
-  /routes
-    auth.ts          # Registration, login (stateless)
-    meetings.ts      # CRUD operations
-    processing.ts    # Transcode, transcribe, actions
-    reports.ts       # WBR summary
-  /services
-    s3.ts            # S3 operations with presigned URLs
-    ddb.ts           # DynamoDB operations
-    ffmpegService.ts # Video transcoding
-    openaiService.ts # AI integration
-    cognitoAuth.ts   # Direct Cognito API calls
-  /utils
-    temp.ts          # Temp directory management
-```
+### Cognito User Pool `a2-n8501645-users`
+- SRP password auth or custom MFA flow (TOTP).
+- Groups used for authorization: `Admin` (full processing + deletion rights) vs regular users (upload/view only).
+- `/v1/me` surfaces current user profile, groups and MFA status for the frontend to react appropriately.
 
-## 🔧 Troubleshooting
+### AWS Secrets Manager & Parameter Store
+- Secret `a2-n8501645` exposes the OpenAI API key with caching and retry logic.
+- Parameter `/wbr/api_base_url` provides the canonical public API base URL. `/v1/config` returns this to clients.
 
-### "Token has expired" errors
 
-AWS Academy credentials expire every few hours. Refresh:
-1. Go to AWS Academy Learner Lab
-2. Click "AWS Details"
-3. Copy fresh credentials
-4. Update `.env`
-5. Restart server
+## Deployment Notes
 
-### "Invalid token issuer"
+### Local / Dev
+- Run `npm run dev` (ts-node-dev with transpile-only).
+- `.env` contains Windows-friendly FFmpeg path and placeholder AWS credentials.
+- Ensure AWS Academy credentials are refreshed frequently; failures like `ExpiredTokenException` mean you need fresh keys.
 
-Check `COGNITO_USER_POOL_ID` matches your actual pool ID.
+### Docker + EC2
+- Build: `docker build -t wbr-actionizer .`
+- Local run: `docker run -p 8080:8080 --env-file .env ...`
+- For EC2, push image to ECR, assign IAM role granting S3/DynamoDB/Secrets/SSM access, then run container with appropriate env vars. Diagram + instructions in project docs (`DOCKER_DEPLOYMENT.md`).
 
-### Transcode fails
+### Health + Monitoring
+- `/health` returns uptime + OpenAI availability.
+- SSE logs (`📡` entries) surface connection lifecycle; repeated `getaddrinfo ENOENT` indicates expired AWS credentials or missing network access.
 
-Ensure `FFMPEG_PATH` is correct for your OS.
 
-## 📝 License
+## Testing & Validation
+
+- **Stateless verification**: kill server mid-job, restart container, resubmit; job resumes because all state is persisted. Idempotency keys prevent duplicates.
+- **Role enforcement**: attempt processing routes with non-admin token → expect `403`.
+- **MFA checks**: login without MFA as admin triggers warning banner + disabled buttons until TOTP enrollment is completed.
+- **SSE**: observe console logs when killing server; banner `⚠️ Live updates disconnected, retrying...` appears and clears after reconnection.
+
+
+## Housekeeping
+
+- Single source of env documentation (`env.example`).
+- All obsolete setup/test scripts removed.
+- README trimmed to essentials; deep dives live in supporting docs:
+  - `STATELESS_MIGRATION_SUMMARY.md`
+  - `PRESIGNED_URLS_IMPLEMENTATION.md`
+  - `SECRETS_MANAGER_IMPLEMENTATION.md`
+  - `SSM_PARAMETER_STORE_IMPLEMENTATION.md`
+  - `MFA_IMPLEMENTATION.md`
+  - `SSE_IMPLEMENTATION.md`
+
+
+## License
 
 MIT
+
