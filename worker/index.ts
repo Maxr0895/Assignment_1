@@ -1,9 +1,10 @@
 import dotenv from 'dotenv';
+import path from 'path';
 import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, Message } from '@aws-sdk/client-sqs';
 import { TranscodeProcessor, TranscodeJob } from './processor';
 
-// Load environment variables
-dotenv.config();
+// Load environment variables from worker/.env
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 /**
  * Worker Configuration
