@@ -2,7 +2,7 @@
 
 ## 🎯 Deployment Checklist
 
-- [x] **IAM Role Created** → `n8501645-ec2-role` with policy `n8501645-ec2-policy`
+- [x] **IAM Role Verified** → AWS Academy `LabRole` exists (no custom role needed)
 - [ ] **Code Pushed to GitHub** → Ensure `.env` not committed
 - [ ] **API EC2 Launched** → With IAM role attached
 - [ ] **Worker EC2 Launched** → With IAM role attached
@@ -21,7 +21,7 @@
 
 | Resource | Value |
 |----------|-------|
-| **IAM Role** | `n8501645-ec2-role` |
+| **IAM Role** | `LabRole` (AWS Academy pre-created) |
 | **S3 Bucket** | `n8501645-a2` |
 | **DynamoDB Table** | `n8501645-meetings` |
 | **SQS Queue** | `n8501645-job-queue` |
@@ -33,11 +33,11 @@
 
 ---
 
-## 🔐 IAM Role Policy
+## 🔐 IAM Role (LabRole)
 
-See `A3_IAM_ROLE_POLICY.json` for the full policy.
+AWS Academy's `LabRole` is pre-configured with broad permissions.
 
-**Permissions granted:**
+**Permissions included:**
 - ✅ S3: Read/Write to `n8501645-a2` bucket
 - ✅ DynamoDB: CRUD on `n8501645-meetings` table
 - ✅ SQS: Send/Receive/Delete messages on `n8501645-job-queue`
@@ -57,7 +57,7 @@ See `A3_IAM_ROLE_POLICY.json` for the full policy.
   - HTTP (80) from Anywhere
   - HTTPS (443) from Anywhere
   - Custom TCP (8080) from Anywhere
-- **IAM Role:** `n8501645-ec2-role` ⚠️ **REQUIRED**
+- **IAM Role:** `LabRole` ⚠️ **REQUIRED**
 - **Service:** API (port 8080)
 
 ### Worker Instance
@@ -65,7 +65,7 @@ See `A3_IAM_ROLE_POLICY.json` for the full policy.
 - **Type:** t2.medium (or t3.medium)
 - **Security Group:** `n8501645-worker-sg`
   - SSH (22) from My IP
-- **IAM Role:** `n8501645-ec2-role` ⚠️ **REQUIRED**
+- **IAM Role:** `LabRole` ⚠️ **REQUIRED**
 - **Service:** Worker (polls SQS)
 
 ---
@@ -112,7 +112,7 @@ pm2 stop wbr-worker  # Stop Worker
 ### Check IAM Role
 ```bash
 curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
-# Should return: n8501645-ec2-role
+# Should return: LabRole
 ```
 
 ### Test ffmpeg

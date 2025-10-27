@@ -10,35 +10,17 @@ This guide walks you through deploying the WBR Actionizer to EC2 with:
 
 ---
 
-## 🔐 Step 1: Create IAM Role
+## 🔐 Step 1: Use AWS Academy LabRole
 
-### 1.1 Create the Role in AWS Console
+⚠️ **AWS Academy Learner Lab Note:** You cannot create custom IAM roles in AWS Academy. Instead, use the pre-created `LabRole` which already has permissions for S3, DynamoDB, SQS, Secrets Manager, SSM, and CloudWatch.
 
-1. Go to **IAM Console** → **Roles** → **Create role**
-2. **Trusted entity type:** AWS service
-3. **Use case:** EC2
-4. Click **Next**
+### 1.1 Verify LabRole Exists
 
-### 1.2 Attach Policy
+1. Go to **IAM Console** → **Roles**
+2. Search for `LabRole`
+3. Verify it exists and has policies attached (e.g., `LabPolicy`)
 
-1. Click **Create policy** (opens new tab)
-2. Click **JSON** tab
-3. Paste the contents of `A3_IAM_ROLE_POLICY.json`
-4. Click **Next**
-5. **Policy name:** `n8501645-ec2-policy`
-6. Click **Create policy**
-
-### 1.3 Attach Policy to Role
-
-1. Go back to the "Create role" tab
-2. Refresh the policy list
-3. Search for `n8501645-ec2-policy` and select it
-4. Click **Next**
-5. **Role name:** `n8501645-ec2-role`
-6. **Description:** "EC2 role for WBR Actionizer API and Worker"
-7. Click **Create role**
-
-✅ **Done!** Now EC2 instances with this role attached can access S3, DynamoDB, SQS, Secrets Manager, and SSM Parameter Store without credentials in `.env`.
+✅ **Done!** You'll use `LabRole` when launching EC2 instances. This role already has all the permissions you need without credentials in `.env`.
 
 ---
 
@@ -85,7 +67,7 @@ git push origin master
        - HTTPS (443) from Anywhere
        - Custom TCP (8080) from Anywhere (for testing, will remove later)
 7. **Advanced details:**
-   - **IAM instance profile:** `n8501645-ec2-role` ⚠️ **IMPORTANT!**
+   - **IAM instance profile:** `LabRole` ⚠️ **IMPORTANT!**
 8. Click **Launch instance**
 
 ### 3.2 Launch Worker Instance
@@ -96,7 +78,7 @@ git push origin master
      - **Name:** `n8501645-worker-sg`
      - **Rules:**
        - SSH (22) from My IP
-   - **IAM instance profile:** `n8501645-ec2-role` ⚠️ **IMPORTANT!**
+   - **IAM instance profile:** `LabRole` ⚠️ **IMPORTANT!**
 2. Click **Launch instance**
 
 ---
@@ -357,9 +339,9 @@ Once both services are working:
 curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
 ```
 
-Should return: `n8501645-ec2-role`
+Should return: `LabRole`
 
-**If empty:** Re-attach IAM role via EC2 Console → Actions → Security → Modify IAM role
+**If empty:** Re-attach IAM role via EC2 Console → Actions → Security → Modify IAM role → Select `LabRole`
 
 ### ffmpeg Not Found
 
