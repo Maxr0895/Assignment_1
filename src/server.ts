@@ -11,8 +11,13 @@ import eventsRoutes from './routes/events';
 import { configRouter } from './routes/config';
 import { openaiService } from './services/openaiService';
 import { getApiBaseUrl } from './services/ssm';
+import { initSQSService } from './services/sqs';
 
 const app = express();
+
+// Initialize SQS service
+initSQSService(config.sqsQueueUrl);
+console.log('✅ SQS service initialized');
 
 // Middleware
 app.use(cors({

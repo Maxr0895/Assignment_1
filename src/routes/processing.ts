@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { authRequired, requireGroup } from '../middleware/auth';
 import { s3Service } from '../services/s3';
 import { ddbService } from '../services/ddb';
+import { getSQSService } from '../services/sqs';
 import { FFmpegService } from '../services/ffmpegService';
 import { OpenAIService } from '../services/openaiService';
 import { ActionsFallbackService } from '../services/actionsFallback';
@@ -26,141 +27,59 @@ router.use((req, res, next) => {
 
 /**
  * POST /v1/meetings/:id/transcode
- * Transcode video: download from S3, process with ffmpeg, upload outputs to S3
- * Supports idempotency via Idempotency-Key header
+ * Queue a transcode job via SQS (async processing)
+ * Returns immediately with 202 Accepted
  */
 // Note: MFA enforcement removed due to USER_PASSWORD_AUTH flow limitation (doesn't include amr claim)
 // MFA is still enforced at enrollment and frontend UI level
 router.post('/:id/transcode', authRequired, requireGroup('Admin'), async (req, res) => {
-  let tempDir: string | null = null;
   const meetingId = req.params.id;
-  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+  const userId = req.user!.sub;
   
   try {
-    // Check idempotency
-    if (idempotencyKey) {
-      const existing = await ddbService.checkIdempotencyKey(idempotencyKey);
-      if (existing && existing.operation === 'transcode' && existing.meetingId === meetingId) {
-        console.log(`🔁 Returning cached result for idempotency key: ${idempotencyKey}`);
-        return res.json(existing.result);
-      }
-    }
-
     // Get meeting from DynamoDB
     const meeting = await ddbService.getMeeting(meetingId);
     if (!meeting) {
       return res.status(404).json({ error: 'Meeting not found' });
     }
-    
-    // Update status to processing
-    await ddbService.updateMeeting(meetingId, { status: 'processing' });
-    
-    // Create temp directory
-    tempDir = await makeTempDir('transcode');
-    
-    // Download input from S3
-    // Use the actual uploaded filename (for presigned uploads) or default to input.{ext}
-    const originalFilename = meeting.originalFilename || 'input.mp4';
-    const inputExtension = originalFilename.split('.').pop() || 'mp4';
-    const inputS3Key = `${meeting.s3Prefix}/${originalFilename}`;
-    const inputTempPath = path.join(tempDir, `input.${inputExtension}`);
-    
-    console.log(`📥 Downloading from S3: ${inputS3Key}`);
-    const getCommand = new GetObjectCommand({
-      Bucket: config.s3Bucket,
-      Key: inputS3Key
-    });
-    const s3Response = await s3Client.send(getCommand);
-    const inputStream = s3Response.Body as any;
-    const writeStream = fs.createWriteStream(inputTempPath);
-    await new Promise<void>((resolve, reject) => {
-      inputStream.pipe(writeStream);
-      inputStream.on('error', reject);
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
-    });
-    
-    console.log('🎬 Starting ffmpeg transcode...');
-    const result = await ffmpegService.transcodeVideo(inputTempPath, tempDir);
-    
-    // Upload renditions to S3 (idempotent - same keys)
-    console.log('📤 Uploading renditions to S3...');
-    const renditionData = [];
-    for (const rendition of result.renditions) {
-      const filename = path.basename(rendition.path);
-      const s3Key = `${meeting.s3Prefix}/${filename}`;
-      
-      const fileBuffer = fs.readFileSync(rendition.path);
-      await s3Service.putObject(s3Key, fileBuffer, 'video/mp4');
-      
-      // Save rendition metadata to DynamoDB
-      await ddbService.createRendition({
-        meetingId,
-        resolution: rendition.resolution,
-        key: s3Key,
-        sizeBytes: rendition.size_bytes
+
+    // Check if already processing or done
+    if (meeting.status === 'processing') {
+      return res.status(409).json({ 
+        error: 'Transcode already in progress',
+        status: meeting.status
       });
-      
-      renditionData.push({
-        resolution: rendition.resolution,
-        key: s3Key,
-        size_bytes: rendition.size_bytes
+    }
+
+    if (meeting.status === 'done' && meeting.duration_s) {
+      return res.status(409).json({ 
+        error: 'Meeting already transcoded',
+        status: meeting.status
       });
     }
     
-    // Upload audio to S3 (idempotent - same key)
-    const audioPath = path.join(tempDir, 'audio.mp3');
-    if (fs.existsSync(audioPath)) {
-      const audioKey = `${meeting.s3Prefix}/audio.mp3`;
-      const audioBuffer = fs.readFileSync(audioPath);
-      await s3Service.putObject(audioKey, audioBuffer, 'audio/mpeg');
-    }
+    // Update status to queued
+    await ddbService.updateMeeting(meetingId, { status: 'queued' });
     
-    // Upload thumbnails to S3 (idempotent - same keys)
-    const thumbnailUrls = [];
-    for (const thumb of result.thumbnails) {
-      const filename = path.basename(thumb);
-      const s3Key = `${meeting.s3Prefix}/${filename}`;
-      
-      const thumbBuffer = fs.readFileSync(thumb);
-      await s3Service.putObject(s3Key, thumbBuffer, 'image/jpeg');
-      
-      const presignedUrl = await s3Service.getPresignedGetUrl(s3Key);
-      thumbnailUrls.push(presignedUrl);
-    }
-    
-    // Update meeting metadata - status = done
-    await ddbService.updateMeeting(meetingId, {
-      duration_s: result.duration_s,
-      status: 'done'
+    // Publish job to SQS
+    const sqsService = getSQSService();
+    const messageId = await sqsService.publishTranscodeJob({
+      meetingId,
+      userId,
+      requestedAt: new Date().toISOString()
     });
-    
-    // Generate presigned URLs for response
-    const renditionUrls = await Promise.all(
-      renditionData.map(async (r) => ({
-        resolution: r.resolution,
-        url: await s3Service.getPresignedGetUrl(r.key),
-        size_bytes: r.size_bytes
-      }))
-    );
-    
-    const audioUrl = await s3Service.getPresignedGetUrl(`${meeting.s3Prefix}/audio.mp3`);
-    
-    const responseData = {
-      renditions: renditionUrls,
-      audioUrl,
-      thumbnails: thumbnailUrls,
-      duration_s: result.duration_s
-    };
 
-    // Store idempotency key if provided
-    if (idempotencyKey) {
-      await ddbService.storeIdempotencyKey(idempotencyKey, meetingId, 'transcode', responseData);
-    }
+    console.log(`✅ Transcode job queued for meeting ${meetingId} (SQS MessageId: ${messageId})`);
 
-    res.json(responseData);
+    // Return 202 Accepted immediately
+    res.status(202).json({
+      message: 'Transcode job queued successfully',
+      meetingId,
+      status: 'queued',
+      queueMessageId: messageId
+    });
   } catch (error) {
-    console.error('Transcoding error:', error);
+    console.error('Failed to queue transcode job:', error);
     
     // Update status to failed with error message
     await ddbService.updateMeeting(meetingId, { 
@@ -169,13 +88,9 @@ router.post('/:id/transcode', authRequired, requireGroup('Admin'), async (req, r
     });
     
     res.status(500).json({ 
-      error: 'Transcoding failed',
+      error: 'Failed to queue transcode job',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
-  } finally {
-    if (tempDir) {
-      cleanupDir(tempDir).catch(() => undefined);
-    }
   }
 });
 

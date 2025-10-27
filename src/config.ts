@@ -13,6 +13,7 @@ interface Config {
   s3Bucket: string;
   ddbTable: string;
   qutUsername: string;
+  sqsQueueUrl: string;
   // Cognito configuration
   cognitoUserPoolId: string;
   cognitoClientId: string;
@@ -28,6 +29,7 @@ function loadConfig(): Config {
   const s3Bucket = process.env.S3_BUCKET;
   const ddbTable = process.env.DDB_TABLE;
   const qutUsername = process.env.QUT_USERNAME;
+  const sqsQueueUrl = process.env.SQS_QUEUE_URL;
   
   // Cognito configuration
   const cognitoUserPoolId = process.env.COGNITO_USER_POOL_ID;
@@ -71,6 +73,10 @@ function loadConfig(): Config {
     throw new Error('COGNITO_CLIENT_ID environment variable is required');
   }
 
+  if (!sqsQueueUrl) {
+    throw new Error('SQS_QUEUE_URL environment variable is required');
+  }
+
   // Allow override via DATA_DIR; default to project-local ./data to be Windows-friendly
   // Note: For stateless operation, this will only be used for temp files
   const dataDir = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -84,6 +90,7 @@ function loadConfig(): Config {
     s3Bucket,
     ddbTable,
     qutUsername,
+    sqsQueueUrl,
     cognitoUserPoolId,
     cognitoClientId
   };

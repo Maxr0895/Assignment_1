@@ -489,11 +489,27 @@ class WBRApp {
       // Step 1: Get presigned upload URL
       this.showResult("upload-result", "Getting upload URL...", "info");
       
+      // Detect file type, default to video/mp4 for common video files
+      let fileType = file.type;
+      if (!fileType || fileType === '') {
+        const ext = file.name.split('.').pop().toLowerCase();
+        const typeMap = {
+          'mp4': 'video/mp4',
+          'mov': 'video/quicktime',
+          'avi': 'video/x-msvideo',
+          'webm': 'video/webm',
+          'mkv': 'video/x-matroska'
+        };
+        fileType = typeMap[ext] || 'video/mp4';
+      }
+      
+      console.log('📤 Uploading file:', { name: file.name, type: fileType, size: file.size });
+      
       const presignResponse = await this.apiFetch("/v1/files/presign-upload", {
         method: "POST",
         body: JSON.stringify({
           fileName: file.name,
-          fileType: file.type || 'application/octet-stream'
+          fileType: fileType
         })
       });
 
@@ -503,11 +519,12 @@ class WBRApp {
       }
 
       const { uploadUrl, key, meetingId } = await presignResponse.json();
+      console.log('🔑 Got presigned URL for key:', key);
 
       // Step 2: Upload file directly to S3 with progress tracking
       this.showResult("upload-result", "Uploading to S3...", "info");
       
-      await this.uploadToS3WithProgress(uploadUrl, file, (progress) => {
+      await this.uploadToS3WithProgress(uploadUrl, file, fileType, (progress) => {
         progressBar.value = progress;
         progressText.textContent = `${progress}%`;
       });
@@ -552,7 +569,7 @@ class WBRApp {
     }
   }
 
-  uploadToS3WithProgress(url, file, onProgress) {
+  uploadToS3WithProgress(url, file, contentType, onProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
@@ -593,8 +610,9 @@ class WBRApp {
       });
 
       xhr.open('PUT', url);
-      xhr.setRequestHeader('Content-Type', file.type);
-      console.log('🔑 Request headers:', { 'Content-Type': file.type });
+      // CRITICAL: Use the same Content-Type that was used to generate the presigned URL
+      xhr.setRequestHeader('Content-Type', contentType);
+      console.log('🔑 Uploading with Content-Type:', contentType);
       xhr.send(file);
     });
   }
@@ -792,7 +810,7 @@ class WBRApp {
 
       if (response.ok) {
         const data = await response.json();
-        alert("Transcoding completed successfully!");
+        alert("Transcode job queued successfully! Processing will begin shortly. Check the status for updates.");
         this.loadMeetingDetails(this.currentMeetingId); // Refresh details
       } else {
         const error = await response.json();
