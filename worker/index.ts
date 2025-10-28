@@ -4,7 +4,8 @@ import { SQSClient, ReceiveMessageCommand, DeleteMessageCommand, Message } from 
 import { TranscodeProcessor, TranscodeJob } from './processor';
 
 // Load environment variables from worker/.env
-dotenv.config({ path: path.join(__dirname, '.env') });
+// Use process.cwd() to get current working directory (works with ts-node-dev)
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 /**
  * Worker Configuration
